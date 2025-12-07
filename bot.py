@@ -1,88 +1,85 @@
 import os
 import logging
+from telegram import Update
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
 
-# Сначала настраиваем логи
+# Настройка логов
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Берем переменные из Railway
+# Получаем переменные из Railway
 TOKEN = os.getenv('BOT_TOKEN')
 YOUR_ID = os.getenv('YOUR_ID')
 
-# Проверяем переменные
+# Проверяем
 if not TOKEN:
-    logger.error("❌ ОШИБКА: Нет переменной BOT_TOKEN!")
+    logger.error("❌ Нет BOT_TOKEN! Добавь в Railway Variables")
     exit()
 
 if not YOUR_ID:
-    logger.error("❌ ОШИБКА: Нет переменной YOUR_ID!")
+    logger.error("❌ Нет YOUR_ID! Добавь в Railway Variables")
     exit()
 
 try:
     YOUR_ID = int(YOUR_ID)
-    logger.info(f"✅ ID получен: {YOUR_ID}")
 except ValueError:
-    logger.error(f"❌ ОШИБКА: YOUR_ID должен быть цифрами! Получено: {YOUR_ID}")
+    logger.error(f"❌ YOUR_ID должен быть цифрами! Сейчас: {YOUR_ID}")
     exit()
 
-# Теперь импортируем telegram (после проверок)
-try:
-    from telegram import Update
-    from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-    logger.info("✅ Библиотеки загружены")
-except ImportError as e:
-    logger.error(f"❌ Ошибка импорта библиотек: {e}")
-    logger.error("Проверь requirements.txt - должны быть: python-telegram-bot==20.7 и imghdr")
-    exit()
+logger.info(f"✅ Токен: {TOKEN[:10]}...")
+logger.info(f"✅ ID: {YOUR_ID}")
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('👋 Привет! Я анонимный бот. Отправь мне сообщение.')
+# Обработчики
+def start(update, context):
+    update.message.reply_text('👋 Привет! Я анонимный бот. Отправь мне любое сообщение.')
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def handle_message(update, context):
     # Пропускаем свои сообщения
-    if update.effective_user.id == YOUR_ID:
+    if update.message.from_user.id == YOUR_ID:
         return
     
-    # Получаем текст
+    user = update.message.from_user
     text = update.message.text or update.message.caption or "📎 Медиа-сообщение"
     
-    # Формируем сообщение
-    user = update.effective_user
-    message_to_admin = f"📩 Новое сообщение:\n\n{text}\n\n"
-    message_to_admin += f"👤 ID отправителя: {user.id}"
+    logger.info(f"📨 Сообщение от {user.id}: {text[:50]}...")
     
-    try:
-        # Отправляем тебе
-        await context.bot.send_message(
-            chat_id=YOUR_ID,
-            text=message_to_admin
-        )
-        
-        # Подтверждаем отправителю
-        await update.message.reply_text("✅ Отправлено!")
-        
-    except Exception as e:
-        logger.error(f"Ошибка: {e}")
+    # Отправляем тебе
+    context.bot.send_message(
+        chat_id=YOUR_ID,
+        text=f"📩 *Новое сообщение:*\n\n{text}\n\n👤 От: {user.id}",
+        parse_mode='Markdown'
+    )
+    
+    # Подтверждение отправителю
+    update.message.reply_text("✅ Сообщение отправлено анонимно!")
+
+def error(update, context):
+    logger.warning(f'Ошибка: {context.error}')
 
 def main():
     logger.info("🚀 Запускаю бота...")
     
     try:
-        # Создаем приложение
-        application = Application.builder().token(TOKEN).build()
+        # Создаем updater
+        updater = Updater(TOKEN, use_context=True)
+        
+        # Получаем dispatcher
+        dp = updater.dispatcher
         
         # Добавляем обработчики
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
-        
-        logger.info("✅ Бот запущен!")
-        logger.info("⏳ Ожидаю сообщения...")
+        dp.add_handler(CommandHandler("start", start))
+        dp.add_handler(MessageHandler(Filters.all, handle_message))
+        dp.add_error_handler(error)
         
         # Запускаем
-        application.run_polling()
+        updater.start_polling()
+        logger.info("✅ Бот успешно запущен и работает!")
+        
+        # Ожидаем остановки
+        updater.idle()
         
     except Exception as e:
         logger.error(f"❌ Ошибка запуска: {e}")
