@@ -3,43 +3,86 @@ import logging
 from telegram import Update
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
 
-logging.basicConfig(level=logging.INFO)
+# Настройка логов
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
+# Получаем переменные из Railway
 TOKEN = os.getenv('BOT_TOKEN')
-YOUR_ID = int(os.getenv('YOUR_ID'))
+YOUR_ID = os.getenv('YOUR_ID')
 
+# Проверяем
+if not TOKEN:
+    logger.error("❌ Нет BOT_TOKEN! Добавь в Railway Variables")
+    exit()
+
+if not YOUR_ID:
+    logger.error("❌ Нет YOUR_ID! Добавь в Railway Variables")
+    exit()
+
+try:
+    YOUR_ID = int(YOUR_ID)
+except ValueError:
+    logger.error(f"❌ YOUR_ID должен быть цифрами! Сейчас: {YOUR_ID}")
+    exit()
+
+logger.info(f"✅ Токен: {TOKEN[:10]}...")
+logger.info(f"✅ ID: {YOUR_ID}")
+
+# Обработчики
 def start(update, context):
-    update.message.reply_text('📨 Анонимный ящик. Отправляй сообщения - они дойдут без сохранения данных.')
+    update.message.reply_text('👋 Привет! Я анонимный бот. Отправь мне любое сообщение, и я передам его админу.')
 
 def handle_message(update, context):
+    # Пропускаем свои сообщения
     if update.message.from_user.id == YOUR_ID:
         return
     
-    text = update.message.text or update.message.caption or "[Медиа-файл]"
+    text = update.message.text or update.message.caption or "📎 Медиа-сообщение"
     
-    # Только для логов (не видно пользователям)
-    logger.info(f"📨 Анонимное сообщение получено")
+    # Логируем для себя (только в Railway видно)
+    logger.info(f"📨 Сообщение от пользователя {update.message.from_user.id}: {text[:50]}...")
     
-    # Отправляем тебе - полностью чистое сообщение
+    # Отправляем тебе БЕЗ ID пользователя
     context.bot.send_message(
         chat_id=YOUR_ID,
-        text=f"{text}"
+        text=f"📩 Новое сообщение:\n\n{text}",
+        parse_mode='Markdown'
     )
     
-    # Подтверждение
-    update.message.reply_text("✅ Доставлено")
+    # Подтверждение отправителю
+    update.message.reply_text("✅ Сообщение отправлено анонимно!")
+
+def error(update, context):
+    logger.warning(f'Ошибка: {context.error}')
 
 def main():
-    updater = Updater(TOKEN, use_context=True)
-    dp = updater.dispatcher
+    logger.info("🚀 Запускаю бота...")
     
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(MessageHandler(Filters.all, handle_message))
-    
-    logger.info("✅ Анонимный бот запущен")
-    updater.start_polling()
-    updater.idle()
+    try:
+        # Создаем updater
+        updater = Updater(TOKEN, use_context=True)
+        
+        # Получаем dispatcher
+        dp = updater.dispatcher
+        
+        # Добавляем обработчики
+        dp.add_handler(CommandHandler("start", start))
+        dp.add_handler(MessageHandler(Filters.all, handle_message))
+        dp.add_error_handler(error)
+        
+        # Запускаем
+        updater.start_polling()
+        logger.info("✅ Бот успешно запущен и работает!")
+        
+        # Ожидаем остановки
+        updater.idle()
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка запуска: {e}")
 
 if __name__ == '__main__':
     main()
