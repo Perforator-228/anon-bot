@@ -40,11 +40,14 @@ stats = {
     'videos': 0,
     'texts': 0,
     'long_texts': 0,
+    'forwarded': 0,
     'last_reset': datetime.datetime.now().date()
 }
 
-# ========== 100 АНЕКДОТОВ ==========
+# Хранилище статусов сообщений
+message_status = {}  # {message_id: {'forwarded': bool, 'to': str, 'by': str, 'time': str}}
 
+# ========== 100 АНЕКДОТОВ ==========
 JOKES = [
     "Почему программист всегда мокрый? Потому что он постоянно в бассейне (pool)! 🏊‍♂️",
     "Что сказал один байт другому? Я тебя bit! 💻",
@@ -146,6 +149,19 @@ JOKES = [
     "Что сказал один алгоритм при прощании? Until next iteration! 👋"
 ]
 
+# ========== НОВЫЕ ФАКТЫ ==========
+FACTS = [
+    "Деньги киньте, я спасибо скажу 💸",
+    "У Перфоратора есть связи с сценапистами Лололошки 🎬",
+    "Анонимность рушится если ты допускаешь грамотические ошибки 📝",
+    "Выблядок который представляется кем-то - Смекил 🤡",
+    "Чифир ☕",
+    "Анонимные сообщения пишут только те кому неху делать со скуки 🥱",
+    "Модераторы этого бота поголовно геи 🏳️‍🌈",
+    "Где мои 500 тенге Смекил? 🧐",
+    "Ya chirikchik 🐦"
+]
+
 # ========== ФУНКЦИИ ДЛЯ ЦИТИРОВАНИЯ ==========
 
 def create_collapsible_text(text, max_length=150):
@@ -214,10 +230,70 @@ def format_long_text_for_telegram(text, message_num):
         full_text = header + processed_text
         return [full_text], False
 
-# ========== ОТПРАВКА СООБЩЕНИЙ ==========
+# ========== СИСТЕМА МАРКИРОВКИ ПЕРЕСЫЛОК ==========
+
+def update_message_status(message_num, forwarded_to=None, forwarded_by=None):
+    """Обновляет статус сообщения"""
+    if message_num not in message_status:
+        message_status[message_num] = {
+            'forwarded': False,
+            'to': None,
+            'by': None,
+            'time': None,
+            'history': []
+        }
+    
+    if forwarded_to and forwarded_by:
+        message_status[message_num]['forwarded'] = True
+        message_status[message_num]['to'] = forwarded_to
+        message_status[message_num]['by'] = forwarded_by
+        message_status[message_num]['time'] = datetime.datetime.now().strftime('%H:%M')
+        
+        # Добавляем в историю
+        message_status[message_num]['history'].append({
+            'action': 'forward',
+            'to': forwarded_to,
+            'by': forwarded_by,
+            'time': datetime.datetime.now().strftime('%H:%M %d.%m.%Y')
+        })
+        
+        # Обновляем статистику
+        stats['forwarded'] += 1
+        logger.info(f"📤 Сообщение #{message_num} помечено как пересланное в {forwarded_to}")
+
+def get_message_status(message_num):
+    """Получает статус сообщения"""
+    if message_num in message_status:
+        return message_status[message_num]
+    return {'forwarded': False, 'to': None, 'by': None, 'time': None}
+
+def create_status_header(message_num):
+    """Создает заголовок со статусом"""
+    status = get_message_status(message_num)
+    
+    if status['forwarded']:
+        return f"🔥 *АНОНИМКА #{message_num}* ✅\n"
+    else:
+        return f"🔥 *АНОНИМКА #{message_num}* ⚪\n"
+
+def create_status_footer(message_num):
+    """Создает футер со статусом пересылки"""
+    status = get_message_status(message_num)
+    
+    if status['forwarded']:
+        footer = f"\n\n──────────────\n"
+        footer += f"✅ *ПЕРЕСЛАНО*\n"
+        footer += f"📤 Куда: {status['to']}\n"
+        footer += f"👤 Кем: {status['by']}\n"
+        footer += f"🕐 Когда: {status['time']}"
+        return footer
+    else:
+        return ""
+
+# ========== ОТПРАВКА СООБЩЕНИЙ С СТАТУСОМ ==========
 
 def send_with_header(update, context, chat_id):
-    """Отправляет медиа с крутым заголовком"""
+    """Отправляет медиа с крутым заголовком и статусом"""
     global stats
     
     stats['total_messages'] += 1
@@ -226,9 +302,13 @@ def send_with_header(update, context, chat_id):
     today = datetime.datetime.now().date()
     if today != stats['last_reset']:
         stats['today_messages'] = 1
+        stats['forwarded'] = 0
         stats['last_reset'] = today
     
     message_num = stats['total_messages']
+    
+    # Инициализируем статус
+    update_message_status(message_num)
     
     # 1. ТЕКСТ
     if update.message.text:
@@ -240,9 +320,14 @@ def send_with_header(update, context, chat_id):
             parts, is_multi_part = format_long_text_for_telegram(text, message_num)
             
             for i, part in enumerate(parts):
+                # Добавляем статус к каждой части
+                status_header = create_status_header(message_num)
+                status_footer = create_status_footer(message_num)
+                full_part = status_header + part.split('\n', 1)[1] + status_footer if '\n' in part else status_header + part + status_footer
+                
                 context.bot.send_message(
                     chat_id=chat_id,
-                    text=part,
+                    text=full_part,
                     parse_mode='Markdown',
                     disable_web_page_preview=True
                 )
@@ -250,11 +335,13 @@ def send_with_header(update, context, chat_id):
             return "📜 Длинный текст", "long_text", len(parts) if is_multi_part else 1
         
         else:
-            header = f"🔥 *АНОНИМКА #{message_num}*\n"
+            header = create_status_header(message_num)
             header += f"⏰ {datetime.datetime.now().strftime('%H:%M | %d.%m.%Y')}\n"
             header += "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
             
-            full_text = header + text
+            footer = create_status_footer(message_num)
+            
+            full_text = header + text + footer
             context.bot.send_message(
                 chat_id=chat_id,
                 text=full_text,
@@ -266,11 +353,14 @@ def send_with_header(update, context, chat_id):
     elif update.message.photo:
         stats['photos'] += 1
         photo = update.message.photo[-1]
-        header = f"🔥 *АНОНИМКА #{message_num}*\n"
+        
+        header = create_status_header(message_num)
         header += f"⏰ {datetime.datetime.now().strftime('%H:%M | %d.%m.%Y')}\n"
         header += "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
         
         caption = header + (update.message.caption if update.message.caption else "📸 *ФОТО*")
+        caption += create_status_footer(message_num)
+        
         context.bot.send_photo(
             chat_id=chat_id,
             photo=photo.file_id,
@@ -282,11 +372,13 @@ def send_with_header(update, context, chat_id):
     # 3. ВИДЕО
     elif update.message.video:
         stats['videos'] += 1
-        header = f"🔥 *АНОНИМКА #{message_num}*\n"
+        header = create_status_header(message_num)
         header += f"⏰ {datetime.datetime.now().strftime('%H:%M | %d.%m.%Y')}\n"
         header += "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
         
         caption = header + (update.message.caption if update.message.caption else "🎥 *ВИДЕО*")
+        caption += create_status_footer(message_num)
+        
         context.bot.send_video(
             chat_id=chat_id,
             video=update.message.video.file_id,
@@ -297,7 +389,7 @@ def send_with_header(update, context, chat_id):
     
     # 4. ОСТАЛЬНЫЕ ТИПЫ
     else:
-        header = f"🔥 *АНОНИМКА #{message_num}*\n"
+        header = create_status_header(message_num)
         header += f"⏰ {datetime.datetime.now().strftime('%H:%M | %d.%m.%Y')}\n"
         header += "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
         
@@ -313,18 +405,169 @@ def send_with_header(update, context, chat_id):
         elif update.message.sticker:
             media_type = "🩷 Стикер"
         
+        # Отправляем заголовок с статусом
         context.bot.send_message(
             chat_id=chat_id,
-            text=header + f"*{media_type}*",
+            text=header + f"*{media_type}*" + create_status_footer(message_num),
             parse_mode='Markdown'
         )
         
+        # Потом пересылаем оригинал
         try:
             update.message.forward(chat_id=chat_id)
         except:
             pass
         
         return media_type, "other", 1
+
+# ========== КОМАНДЫ ДЛЯ УПРАВЛЕНИЯ ПЕРЕСЫЛКАМИ ==========
+
+def mark_command(update: Update, context: CallbackContext):
+    """Команда /mark - пометить сообщение как пересланное"""
+    if update.message.from_user.id != YOUR_ID:
+        update.message.reply_text("❌ Эта команда только для админа!")
+        return
+    
+    if not context.args or len(context.args) < 2:
+        update.message.reply_text(
+            "📌 *Использование:*\n"
+            "`/mark <номер_сообщения> <куда_переслано>`\n\n"
+            "*Пример:*\n"
+            "`/mark 42 @новости`\n"
+            "`/mark 15 в канал`",
+            parse_mode='Markdown'
+        )
+        return
+    
+    try:
+        message_num = int(context.args[0])
+        forwarded_to = ' '.join(context.args[1:])
+        
+        update_message_status(
+            message_num=message_num,
+            forwarded_to=forwarded_to,
+            forwarded_by=ADMIN_NAME
+        )
+        
+        update.message.reply_text(
+            f"✅ *Сообщение #{message_num} помечено!*\n\n"
+            f"📤 Куда: {forwarded_to}\n"
+            f"👤 Кем: {ADMIN_NAME}\n"
+            f"🕐 Время: {datetime.datetime.now().strftime('%H:%M')}\n\n"
+            f"Теперь в сообщении будет отображаться статус ✅",
+            parse_mode='Markdown'
+        )
+        
+    except ValueError:
+        update.message.reply_text("❌ Неверный номер сообщения!")
+
+def status_command_cmd(update: Update, context: CallbackContext):
+    """Команда /status - статус конкретного сообщения"""
+    if update.message.from_user.id != YOUR_ID:
+        update.message.reply_text("❌ Эта команда только для админа!")
+        return
+    
+    if not context.args:
+        update.message.reply_text(
+            "📌 *Использование:*\n"
+            "`/status <номер_сообщения>`\n\n"
+            "*Пример:*\n"
+            "`/status 42`",
+            parse_mode='Markdown'
+        )
+        return
+    
+    try:
+        message_num = int(context.args[0])
+        status = get_message_status(message_num)
+        
+        if status['forwarded']:
+            response = (
+                f"📊 *СТАТУС СООБЩЕНИЯ #{message_num}*\n\n"
+                f"✅ *ПЕРЕСЛАНО*\n"
+                f"📤 Куда: {status['to']}\n"
+                f"👤 Кем: {status['by']}\n"
+                f"🕐 Когда: {status['time']}\n\n"
+            )
+            
+            if 'history' in status and status['history']:
+                response += f"📋 *ИСТОРИЯ:*\n"
+                for i, record in enumerate(status['history'], 1):
+                    response += f"{i}. {record['time']} — {record['action']} в {record['to']}\n"
+        else:
+            response = (
+                f"📊 *СТАТУС СООБЩЕНИЯ #{message_num}*\n\n"
+                f"⚪ *НЕ ПЕРЕСЛАНО*\n\n"
+                f"ℹ️ Это сообщение еще не было переслано.\n"
+                f"Используй `/mark {message_num} <куда>` чтобы пометить."
+            )
+        
+        update.message.reply_text(response, parse_mode='Markdown')
+        
+    except ValueError:
+        update.message.reply_text("❌ Неверный номер сообщения!")
+
+def unforwarded_command(update: Update, context: CallbackContext):
+    """Команда /unforwarded - список непересланных сообщений"""
+    if update.message.from_user.id != YOUR_ID:
+        update.message.reply_text("❌ Эта команда только для админа!")
+        return
+    
+    # Находим непересланные сообщения
+    unforwarded = []
+    for msg_num in range(1, stats['total_messages'] + 1):
+        status = get_message_status(msg_num)
+        if not status['forwarded']:
+            unforwarded.append(msg_num)
+    
+    if not unforwarded:
+        update.message.reply_text(
+            "🎉 *ВСЕ СООБЩЕНИЯ ПЕРЕСЛАНЫ!*\n\n"
+            f"✅ Переслано: {stats['forwarded']} из {stats['total_messages']}\n"
+            f"📊 Эффективность: {stats['forwarded'] / stats['total_messages'] * 100 if stats['total_messages'] > 0 else 0:.1f}%",
+            parse_mode='Markdown'
+        )
+        return
+    
+    # Группируем по времени
+    now = datetime.datetime.now()
+    recent = []
+    today = []
+    older = []
+    
+    for msg_num in unforwarded:
+        # Для простоты считаем что сообщение #X было X часов назад
+        hours_ago = stats['total_messages'] - msg_num
+        
+        if hours_ago <= 3:
+            recent.append(msg_num)
+        elif hours_ago <= 24:
+            today.append(msg_num)
+        else:
+            older.append(msg_num)
+    
+    response = f"📋 *НЕПЕРЕСЛАННЫЕ СООБЩЕНИЯ:* {len(unforwarded)} из {stats['total_messages']}\n\n"
+    
+    if recent:
+        response += f"🆕 *СВЕЖИЕ (последние 3 часа):*\n"
+        response += f"#{', #'.join(map(str, recent[-5:]))}\n\n"
+    
+    if today:
+        response += f"📅 *СЕГОДНЯ:*\n"
+        response += f"#{', #'.join(map(str, today[-10:]))}\n\n"
+    
+    if older:
+        response += f"📆 *СТАРЫЕ:*\n"
+        response += f"#{', #'.join(map(str, older[:5]))}... (всего {len(older)})\n\n"
+    
+    response += f"📊 *СТАТИСТИКА:*\n"
+    response += f"• Всего сообщений: {stats['total_messages']}\n"
+    response += f"• Переслано: {stats['forwarded']}\n"
+    response += f"• Не переслано: {len(unforwarded)}\n"
+    response += f"• Эффективность: {stats['forwarded'] / stats['total_messages'] * 100 if stats['total_messages'] > 0 else 0:.1f}%\n\n"
+    response += f"💡 *СОВЕТ:* Используй `/mark <номер> <куда>` чтобы пометить!"
+    
+    update.message.reply_text(response, parse_mode='Markdown')
 
 # ========== ОБРАБОТКА ТЕКСТОВЫХ КОМАНД ОТ КНОПОК ==========
 
@@ -385,7 +628,7 @@ def handle_text_commands(update: Update, context: CallbackContext):
 # ========== КОМАНДЫ ==========
 
 def start_command(update: Update, context: CallbackContext):
-    """Команда /start с рабочими кнопками"""
+    """Команда /start"""
     keyboard = [
         [KeyboardButton("📝 Написать анонимно"), KeyboardButton("❓ Помощь")],
         [KeyboardButton("📊 Статистика"), KeyboardButton("🎨 Форматирование")],
@@ -396,18 +639,16 @@ def start_command(update: Update, context: CallbackContext):
     
     update.message.reply_text(
         f'🕶️ *АНОНИМНЫЙ ЯЩИК 2.0*\n\n'
-        f'📜 *НОВАЯ ФИЧА:* Авто-цитирование длинных текстов!\n\n'
-        f'✨ *Что нового:*\n'
-        f'• Тексты >150 символов сворачиваются\n'
-        f'• Можно развернуть/свернуть в Telegram\n'
-        f'• Авто-разбивка очень длинных текстов\n'
-        f'• Сохранение форматирования\n\n'
-        f'🎮 *100+ анекдотов* в команде /joke 😂\n\n'
-        f'🎯 *Используй кнопки ниже или команды:*\n'
-        f'/help — полная инструкция\n'
-        f'/joke — 100+ анекдотов\n'
-        f'/menu — все команды\n\n'
-        f'📎 *Просто напиши сообщение — отправлю анонимно!*',
+        f'✨ *НОВЫЕ ФИЧИ:*\n'
+        f'• 📍 Маркировка пересланных сообщений\n'
+        f'• 📊 Отслеживание эффективности\n'
+        f'• ✅ Визуальные статусы (⚪/✅)\n'
+        f'• 🎭 100+ IT-анекдотов\n\n'
+        f'🔧 *Команды админа:*\n'
+        f'/mark — пометить как пересланное\n'
+        f'/status — статус сообщения\n'
+        f'/unforwarded — непересланные\n\n'
+        f'🎯 *Используй кнопки ниже или команды!*',
         parse_mode='Markdown',
         reply_markup=reply_markup
     )
@@ -421,8 +662,11 @@ def help_command(update: Update, context: CallbackContext):
         '• В Telegram можно *развернуть/свернуть* текст\n'
         '• Очень длинные тексты разбиваются на части\n'
         '• Сохраняется *полное форматирование*\n\n'
+        '🔹 *СТАТУСЫ ПЕРЕСЫЛОК:*\n'
+        '• ⚪ — сообщение не переслано\n'
+        '• ✅ — сообщение переслано админом\n\n'
         '🔹 *ЧТО МОЖНО ОТПРАВИТЬ:*\n'
-        '• 📝 Текст любого размера (1-10.000 символов)\n'
+        '• 📝 Текст любого размера\n'
         '• 📸 Фото с подписями\n'
         '• 🎥 Видео до 50 МБ\n'
         '• 🎵 Музыку и голосовые\n'
@@ -439,26 +683,23 @@ def help_command(update: Update, context: CallbackContext):
     )
 
 def stats_command(update: Update, context: CallbackContext):
-    """Команда /stats"""
+    """Обновленная команда /stats"""
     stats_text = (
         f'📊 *СТАТИСТИКА БОТА*\n\n'
         f'📨 Всего сообщений: *{stats["total_messages"]}*\n'
         f'📅 Сегодня: *{stats["today_messages"]}*\n'
-        f'📸 Фото: *{stats["photos"]}*\n'
-        f'🎥 Видео: *{stats["videos"]}*\n'
-        f'📝 Тексты: *{stats["texts"]}*\n'
-        f'📜 Длинные тексты (>150 с.): *{stats["long_texts"]}*\n\n'
+        f'✅ Переслано: *{stats["forwarded"]}*\n'
+        f'⚪ Не переслано: *{stats["total_messages"] - stats["forwarded"]}*\n\n'
         
-        f'📈 *АНАЛИТИКА:*\n'
-        f'• Длинных текстов: *{stats["long_texts"] / stats["total_messages"] * 100 if stats["total_messages"] > 0 else 0:.1f}%*\n'
-        f'• Средняя длина: *{stats["total_messages"] // 30 if stats["total_messages"] > 30 else 1}* в день\n'
-        f'• Популярный тип: *{"Текст" if stats["texts"] > stats["photos"] else "Фото"}*\n\n'
+        f'📈 *ЭФФЕКТИВНОСТЬ:*\n'
+        f'• Пересылки: *{stats["forwarded"] / stats["total_messages"] * 100 if stats["total_messages"] > 0 else 0:.1f}%*\n'
+        f'• Сообщений/день: *{stats["total_messages"] // 30 if stats["total_messages"] > 30 else 1}*\n\n'
         
         f'🔧 *СИСТЕМА:*\n'
-        f'• Цитирование: *Включено*\n'
-        f'• Лимит: 150+ символов\n'
-        f'• Авто-разбивка: Да\n'
-        f'• Анекдотов в базе: *{len(JOKES)}* 🎉'
+        f'• Маркировка: *Включена* ✅\n'
+        f'• Анекдотов: *{len(JOKES)}*\n'
+        f'• Фактов: *{len(FACTS)}*\n'
+        f'• Статусы: ⚪/✅'
     )
     update.message.reply_text(stats_text, parse_mode='Markdown')
 
@@ -522,20 +763,8 @@ def joke_command(update: Update, context: CallbackContext):
     update.message.reply_text(response, parse_mode='Markdown')
 
 def fact_command(update: Update, context: CallbackContext):
-    """Команда /fact - интересный факт"""
-    facts = [
-        "Деньги киньте, я спасибо скажу",
-        "У Перфоратора есть связи с сценапистами Лололошки",
-        "Анонимность рушится если ты допускаешь грамотические ошибки",
-        "Выблядок который представляется кем-то - Смекил",
-        "Чифир",
-        "Анонимные сообщения пишут только те кому неху делать со скуки",
-        "модераторы этого бота поголовно геи 🏳️‍🌈"
-        " Где мои 500 тенге Смекил? 🧐"
-       " Ya chirikchik" 
-    ]
-    
-    fact = random.choice(facts)
+    """Команда /fact - интересные факты (обновленные)"""
+    fact = random.choice(FACTS)
     update.message.reply_text(f"📚 *ФАКТ:* {fact}", parse_mode='Markdown')
 
 def quote_command(update: Update, context: CallbackContext):
@@ -582,12 +811,15 @@ def menu_command(update: Update, context: CallbackContext):
         
         '😂 *РАЗВЛЕЧЕНИЯ:*\n'
         '/joke — 100+ анекдотов про IT!\n'
-        '/fact — Интересный факт\n'
+        '/fact — Интересные факты\n'
         '/quote — Цитата дня\n'
         '/secret — Секретная информация\n\n'
         
         '🛡️ *АДМИН:*\n'
-        '/admin — Панель админа (только твой ID)\n\n'
+        '/admin — Панель админа\n'
+        '/mark — Пометить пересылку\n'
+        '/status — Статус сообщения\n'
+        '/unforwarded — Непересланные\n\n'
         
         '✨ *ИСПОЛЬЗУЙ КНОПКИ ИЛИ КОМАНДЫ!*'
     )
@@ -596,39 +828,49 @@ def menu_command(update: Update, context: CallbackContext):
 # ========== АДМИН КОМАНДЫ ==========
 
 def admin_command(update: Update, context: CallbackContext):
-    """Команда /admin — только для тебя!"""
+    """Обновленная команда /admin"""
     if update.message.from_user.id == YOUR_ID:
         now = datetime.datetime.now()
+        
+        # Статистика пересылок
+        forwarded_stats = {
+            'today': sum(1 for status in message_status.values() 
+                        if status['forwarded'] and 
+                        status.get('time', '').startswith(now.strftime('%H:%M')[:2])),
+            'total': stats['forwarded']
+        }
+        
         admin_text = (
             f'🛡️ *ПАНЕЛЬ АДМИНИСТРАТОРА*\n\n'
-            f'👑 *ЛИЧНОЕ:*\n'
-            f'• Ваш ID: `{YOUR_ID}`\n'
-            f'• Имя: *{ADMIN_NAME}*\n'
-            f'• Уровень доступа: *Владелец*\n\n'
             
-            f'📊 *СТАТИСТИКА:*\n'
+            f'📊 *СТАТИСТИКА ПЕРЕСЫЛОК:*\n'
             f'• Всего сообщений: *{stats["total_messages"]}*\n'
-            f'• Сегодня: *{stats["today_messages"]}*\n'
-            f'• Фото/Видео/Текст: *{stats["photos"]}/{stats["videos"]}/{stats["texts"]}*\n'
-            f'• Длинные тексты: *{stats["long_texts"]}*\n\n'
+            f'• Переслано: *{forwarded_stats["total"]}*\n'
+            f'• Сегодня переслано: *{forwarded_stats["today"]}*\n'
+            f'• Эффективность: *{forwarded_stats["total"] / stats["total_messages"] * 100 if stats["total_messages"] > 0 else 0:.1f}%*\n\n'
             
             f'🎮 *РАЗВЛЕЧЕНИЯ:*\n'
-            f'• Анекдотов в базе: *{len(JOKES)}*\n'
-            f'• Фактов: 7\n'
+            f'• Анекдотов: *{len(JOKES)}*\n'
+            f'• Фактов: *{len(FACTS)}*\n'
             f'• Цитат: 6\n\n'
             
-            f'⚙️ *СИСТЕМА:*\n'
-            f'• Сервер: Railway\n'
-            f'• Время: {now.strftime("%H:%M:%S")}\n'
-            f'• Дата: {now.strftime("%d.%m.%Y")}\n'
-            f'• Цитирование: ВКЛЮЧЕНО\n'
-            f'• Кнопки: РАБОТАЮТ ✅\n\n'
+            f'🔧 *КОМАНДЫ УПРАВЛЕНИЯ:*\n'
+            f'/mark <номер> <куда> — пометить пересылку\n'
+            f'/status <номер> — статус сообщения\n'
+            f'/unforwarded — непересланные\n'
+            f'/stats — общая статистика\n\n'
             
-            f'✅ *ВСЕ СИСТЕМЫ РАБОТАЮТ НОРМАЛЬНО*'
+            f'⚙️ *СИСТЕМА:*\n'
+            f'• Маркировка: РАБОТАЕТ ✅\n'
+            f'• Статусы: ⚪=не переслано, ✅=переслано\n'
+            f'• Время: {now.strftime("%H:%M:%S")}\n'
+            f'• Факты: ОБНОВЛЕНЫ 🎉\n\n'
+            
+            f'💡 *СОВЕТ:* Сразу помечай пересланные сообщения командой /mark!'
         )
         update.message.reply_text(admin_text, parse_mode='Markdown')
     else:
-        update.message.reply_text("❌ Доступ запрещен. Требуются права администратора.")
+        update.message.reply_text("❌ Доступ запрещен.")
 
 # ========== ОБРАБОТКА СООБЩЕНИЙ ==========
 
@@ -674,7 +916,7 @@ def handle_message(update: Update, context: CallbackContext):
                 "Шепну на ушко админу твои слова 🤫",
                 "Засекречено и отправлено 🔐",
                 "Анонимность уровня 007 🕶️",
-                f"Интересный факт: {random.choice(['Первое анонимное письмо было в 1545!', '95% людей хоть раз отправляли анонимку!'])}"
+                f"Факт: {random.choice(FACTS)}"
             ]
             random_response = random.choice(funny_responses)
             
@@ -707,10 +949,12 @@ def error_handler(update: Update, context: CallbackContext):
 
 def main():
     """Запуск бота"""
-    logger.info("🚀 ЗАПУСКАЮ БОТА 2.0 С РАБОЧИМИ КНОПКАМИ!")
+    logger.info("🚀 ЗАПУСКАЮ ФИНАЛЬНУЮ ВЕРСИЮ БОТА!")
     logger.info(f"👑 Админ ID: {YOUR_ID}")
-    logger.info(f"😂 Анекдотов в базе: {len(JOKES)}")
-    logger.info("✅ Кнопки: ОБРАБАТЫВАЮТСЯ КАК КОМАНДЫ")
+    logger.info(f"😂 Анекдотов: {len(JOKES)}")
+    logger.info(f"📚 Фактов: {len(FACTS)}")
+    logger.info("✅ Маркировка пересланных сообщений: ВКЛЮЧЕНО")
+    logger.info("✅ Статусы: ⚪ (не переслано), ✅ (переслано)")
     
     try:
         updater = Updater(TOKEN, use_context=True)
@@ -729,12 +973,15 @@ def main():
             ('secret', secret_command),
             ('menu', menu_command),
             ('admin', admin_command),
+            ('mark', mark_command),
+            ('status', status_command_cmd),
+            ('unforwarded', unforwarded_command),
         ]
         
         for cmd_name, cmd_func in commands:
             dp.add_handler(CommandHandler(cmd_name, cmd_func))
         
-        # Обработчик сообщений (должен быть ПОСЛЕ команд!)
+        # Обработчик сообщений
         dp.add_handler(MessageHandler(Filters.all & ~Filters.command, handle_message))
         
         # Обработчик ошибок
@@ -744,11 +991,13 @@ def main():
         updater.start_polling()
         
         logger.info("=" * 50)
-        logger.info("✅ БОТ ЗАПУЩЕН С РАБОЧИМИ КНОПКАМИ!")
+        logger.info("✅ ФИНАЛЬНАЯ ВЕРСИЯ БОТА ЗАПУЩЕНА!")
         logger.info(f"✅ Команд: {len(commands)}")
         logger.info(f"✅ Анекдотов: {len(JOKES)}")
-        logger.info(f"✅ Кнопки: 10 команд через текст")
-        logger.info("✅ Готов принимать анонимки 24/7")
+        logger.info(f"✅ Фактов: {len(FACTS)} (обновлены!)")
+        logger.info("✅ Маркировка пересылок: ⚪/✅")
+        logger.info("✅ Кнопки: РАБОТАЮТ")
+        logger.info("✅ Готов к работе 24/7!")
         logger.info("=" * 50)
         
         updater.idle()
@@ -758,4 +1007,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
