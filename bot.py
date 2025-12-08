@@ -2,6 +2,7 @@ import os
 import logging
 import datetime
 import random
+import string
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
 
@@ -44,8 +45,9 @@ stats = {
     'last_reset': datetime.datetime.now().date()
 }
 
-# Хранилище статусов сообщений
-message_status = {}  # {message_id: {'forwarded': bool, 'to': str, 'by': str, 'time': str}}
+# Хранилище сообщений с уникальными ID
+messages_db = {}  # {message_id: {'content': str, 'user_id': int, 'time': str, 'forwarded': bool, ...}}
+message_counter = 0  # Только для нумерации в интерфейсе
 
 # ========== 100 АНЕКДОТОВ ==========
 JOKES = [
@@ -162,6 +164,79 @@ FACTS = [
     "Ya chirikchik 🐦"
 ]
 
+# ========== ГЕНЕРАЦИЯ УНИКАЛЬНЫХ ID ==========
+
+def generate_message_id():
+    """Генерирует уникальный ID для сообщения"""
+    timestamp = int(datetime.datetime.now().timestamp())
+    random_part = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
+    return f"{timestamp}_{random_part}"
+
+def save_message(content, user_id, media_type="text", file_id=None, caption=None):
+    """Сохраняет сообщение в базу"""
+    global message_counter
+    
+    message_id = generate_message_id()
+    message_counter += 1
+    
+    messages_db[message_id] = {
+        'id': message_id,
+        'display_number': message_counter,  # Для отображения пользователю
+        'content': content,
+        'file_id': file_id,
+        'caption': caption,
+        'user_id': user_id,
+        'media_type': media_type,
+        'time': datetime.datetime.now().strftime('%H:%M %d.%m.%Y'),
+        'forwarded': False,
+        'forwarded_to': None,
+        'forwarded_by': None,
+        'forwarded_time': None
+    }
+    
+    logger.info(f"💾 Сохранено сообщение #{message_counter} (ID: {message_id})")
+    return message_id, message_counter
+
+def update_message_status(message_id, forwarded_to=None, forwarded_by=None):
+    """Обновляет статус сообщения"""
+    if message_id in messages_db:
+        messages_db[message_id]['forwarded'] = True
+        messages_db[message_id]['forwarded_to'] = forwarded_to
+        messages_db[message_id]['forwarded_by'] = forwarded_by
+        messages_db[message_id]['forwarded_time'] = datetime.datetime.now().strftime('%H:%M')
+        
+        # Обновляем статистику
+        stats['forwarded'] += 1
+        logger.info(f"📤 Сообщение ID:{message_id} помечено как пересланное в {forwarded_to}")
+        return True
+    return False
+
+def get_message_status(message_id):
+    """Получает статус сообщения"""
+    if message_id in messages_db:
+        return messages_db[message_id]
+    return None
+
+def create_status_header(message_data):
+    """Создает заголовок со статусом"""
+    if message_data['forwarded']:
+        return f"🔥 *АНОНИМКА #{message_data['display_number']}* ✅\n"
+    else:
+        return f"🔥 *АНОНИМКА #{message_data['display_number']}* ⚪\n"
+
+def create_status_footer(message_data):
+    """Создает футер со статусом пересылки"""
+    if message_data['forwarded']:
+        footer = f"\n\n──────────────\n"
+        footer += f"✅ *ПЕРЕСЛАНО*\n"
+        footer += f"📤 Куда: {message_data['forwarded_to']}\n"
+        footer += f"👤 Кем: {message_data['forwarded_by']}\n"
+        footer += f"🕐 Когда: {message_data['forwarded_time']}\n"
+        footer += f"🔢 ID: `{message_data['id']}`"
+        return footer
+    else:
+        return f"\n\n──────────────\n🔢 ID: `{message_data['id']}`"
+
 # ========== ФУНКЦИИ ДЛЯ ЦИТИРОВАНИЯ ==========
 
 def create_collapsible_text(text, max_length=150):
@@ -230,66 +305,6 @@ def format_long_text_for_telegram(text, message_num):
         full_text = header + processed_text
         return [full_text], False
 
-# ========== СИСТЕМА МАРКИРОВКИ ПЕРЕСЫЛОК ==========
-
-def update_message_status(message_num, forwarded_to=None, forwarded_by=None):
-    """Обновляет статус сообщения"""
-    if message_num not in message_status:
-        message_status[message_num] = {
-            'forwarded': False,
-            'to': None,
-            'by': None,
-            'time': None,
-            'history': []
-        }
-    
-    if forwarded_to and forwarded_by:
-        message_status[message_num]['forwarded'] = True
-        message_status[message_num]['to'] = forwarded_to
-        message_status[message_num]['by'] = forwarded_by
-        message_status[message_num]['time'] = datetime.datetime.now().strftime('%H:%M')
-        
-        # Добавляем в историю
-        message_status[message_num]['history'].append({
-            'action': 'forward',
-            'to': forwarded_to,
-            'by': forwarded_by,
-            'time': datetime.datetime.now().strftime('%H:%M %d.%m.%Y')
-        })
-        
-        # Обновляем статистику
-        stats['forwarded'] += 1
-        logger.info(f"📤 Сообщение #{message_num} помечено как пересланное в {forwarded_to}")
-
-def get_message_status(message_num):
-    """Получает статус сообщения"""
-    if message_num in message_status:
-        return message_status[message_num]
-    return {'forwarded': False, 'to': None, 'by': None, 'time': None}
-
-def create_status_header(message_num):
-    """Создает заголовок со статусом"""
-    status = get_message_status(message_num)
-    
-    if status['forwarded']:
-        return f"🔥 *АНОНИМКА #{message_num}* ✅\n"
-    else:
-        return f"🔥 *АНОНИМКА #{message_num}* ⚪\n"
-
-def create_status_footer(message_num):
-    """Создает футер со статусом пересылки"""
-    status = get_message_status(message_num)
-    
-    if status['forwarded']:
-        footer = f"\n\n──────────────\n"
-        footer += f"✅ *ПЕРЕСЛАНО*\n"
-        footer += f"📤 Куда: {status['to']}\n"
-        footer += f"👤 Кем: {status['by']}\n"
-        footer += f"🕐 Когда: {status['time']}"
-        return footer
-    else:
-        return ""
-
 # ========== ОТПРАВКА СООБЩЕНИЙ С СТАТУСОМ ==========
 
 def send_with_header(update, context, chat_id):
@@ -305,24 +320,25 @@ def send_with_header(update, context, chat_id):
         stats['forwarded'] = 0
         stats['last_reset'] = today
     
-    message_num = stats['total_messages']
-    
-    # Инициализируем статус
-    update_message_status(message_num)
+    user = update.message.from_user
     
     # 1. ТЕКСТ
     if update.message.text:
         text = update.message.text
         stats['texts'] += 1
         
+        # Сохраняем сообщение
+        message_id, display_num = save_message(text, user.id, "text")
+        message_data = messages_db[message_id]
+        
         if len(text) > 150:
             stats['long_texts'] += 1
-            parts, is_multi_part = format_long_text_for_telegram(text, message_num)
+            parts, is_multi_part = format_long_text_for_telegram(text, display_num)
             
             for i, part in enumerate(parts):
                 # Добавляем статус к каждой части
-                status_header = create_status_header(message_num)
-                status_footer = create_status_footer(message_num)
+                status_header = create_status_header(message_data)
+                status_footer = create_status_footer(message_data)
                 full_part = status_header + part.split('\n', 1)[1] + status_footer if '\n' in part else status_header + part + status_footer
                 
                 context.bot.send_message(
@@ -332,14 +348,14 @@ def send_with_header(update, context, chat_id):
                     disable_web_page_preview=True
                 )
             
-            return "📜 Длинный текст", "long_text", len(parts) if is_multi_part else 1
+            return "📜 Длинный текст", "long_text", len(parts) if is_multi_part else 1, display_num, message_id
         
         else:
-            header = create_status_header(message_num)
+            header = create_status_header(message_data)
             header += f"⏰ {datetime.datetime.now().strftime('%H:%M | %d.%m.%Y')}\n"
             header += "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
             
-            footer = create_status_footer(message_num)
+            footer = create_status_footer(message_data)
             
             full_text = header + text + footer
             context.bot.send_message(
@@ -347,78 +363,135 @@ def send_with_header(update, context, chat_id):
                 text=full_text,
                 parse_mode='Markdown'
             )
-            return "📝 Текст", "text", 1
+            return "📝 Текст", "text", 1, display_num, message_id
     
     # 2. ФОТО
     elif update.message.photo:
         stats['photos'] += 1
         photo = update.message.photo[-1]
         
-        header = create_status_header(message_num)
+        # Сохраняем сообщение
+        caption = update.message.caption if update.message.caption else "📸 ФОТО"
+        message_id, display_num = save_message(
+            caption, 
+            user.id, 
+            "photo", 
+            photo.file_id, 
+            caption
+        )
+        message_data = messages_db[message_id]
+        
+        header = create_status_header(message_data)
         header += f"⏰ {datetime.datetime.now().strftime('%H:%M | %d.%m.%Y')}\n"
         header += "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
         
-        caption = header + (update.message.caption if update.message.caption else "📸 *ФОТО*")
-        caption += create_status_footer(message_num)
+        caption_text = header + (caption if caption else "📸 *ФОТО*")
+        caption_text += create_status_footer(message_data)
         
         context.bot.send_photo(
             chat_id=chat_id,
             photo=photo.file_id,
-            caption=caption,
+            caption=caption_text,
             parse_mode='Markdown'
         )
-        return "📸 Фото", "photo", 1
+        return "📸 Фото", "photo", 1, display_num, message_id
     
     # 3. ВИДЕО
     elif update.message.video:
         stats['videos'] += 1
-        header = create_status_header(message_num)
+        
+        # Сохраняем сообщение
+        caption = update.message.caption if update.message.caption else "🎥 ВИДЕО"
+        message_id, display_num = save_message(
+            caption, 
+            user.id, 
+            "video", 
+            update.message.video.file_id, 
+            caption
+        )
+        message_data = messages_db[message_id]
+        
+        header = create_status_header(message_data)
         header += f"⏰ {datetime.datetime.now().strftime('%H:%M | %d.%m.%Y')}\n"
         header += "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
         
-        caption = header + (update.message.caption if update.message.caption else "🎥 *ВИДЕО*")
-        caption += create_status_footer(message_num)
+        caption_text = header + (caption if caption else "🎥 *ВИДЕО*")
+        caption_text += create_status_footer(message_data)
         
         context.bot.send_video(
             chat_id=chat_id,
             video=update.message.video.file_id,
-            caption=caption,
+            caption=caption_text,
             parse_mode='Markdown'
         )
-        return "🎥 Видео", "video", 1
+        return "🎥 Видео", "video", 1, display_num, message_id
     
     # 4. ОСТАЛЬНЫЕ ТИПЫ
     else:
-        header = create_status_header(message_num)
-        header += f"⏰ {datetime.datetime.now().strftime('%H:%M | %d.%m.%Y')}\n"
-        header += "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
-        
         media_type = "📦 Медиа"
         if update.message.animation:
             media_type = "🎞️ GIF"
+            file_id = update.message.animation.file_id
         elif update.message.document:
             media_type = "📎 Файл"
+            file_id = update.message.document.file_id
         elif update.message.audio:
             media_type = "🎵 Музыка"
+            file_id = update.message.audio.file_id
         elif update.message.voice:
             media_type = "🎤 Голосовое"
+            file_id = update.message.voice.file_id
         elif update.message.sticker:
             media_type = "🩷 Стикер"
+            file_id = update.message.sticker.file_id
+        else:
+            file_id = None
+        
+        # Сохраняем сообщение
+        caption = update.message.caption if update.message.caption else media_type
+        message_id, display_num = save_message(
+            caption, 
+            user.id, 
+            media_type.lower(), 
+            file_id, 
+            caption
+        )
+        message_data = messages_db[message_id]
+        
+        header = create_status_header(message_data)
+        header += f"⏰ {datetime.datetime.now().strftime('%H:%M | %d.%m.%Y')}\n"
+        header += "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
         
         # Отправляем заголовок с статусом
         context.bot.send_message(
             chat_id=chat_id,
-            text=header + f"*{media_type}*" + create_status_footer(message_num),
+            text=header + f"*{media_type}*" + create_status_footer(message_data),
             parse_mode='Markdown'
         )
         
-        # Потом пересылаем оригинал
+        # Потом пересылаем оригинал если есть file_id
         try:
-            update.message.forward(chat_id=chat_id)
-        except:
-            pass
+            if update.message.animation:
+                context.bot.send_animation(chat_id=chat_id, animation=file_id)
+            elif update.message.document:
+                context.bot.send_document(chat_id=chat_id, document=file_id)
+            elif update.message.audio:
+                context.bot.send_audio(chat_id=chat_id, audio=file_id)
+            elif update.message.voice:
+                context.bot.send_voice(chat_id=chat_id, voice=file_id)
+            elif update.message.sticker:
+                context.bot.send_sticker(chat_id=chat_id, sticker=file_id)
+            else:
+                update.message.forward(chat_id=chat_id)
+        except Exception as e:
+            logger.error(f"Ошибка отправки медиа: {e}")
+            context.bot.send_message(
+                chat_id=chat_id,
+                text=f"⚠️ *Не удалось отправить медиа*\n\nОшибка: {str(e)}",
+                parse_mode='Markdown'
+            )
         
-        return media_type, "other", 1
+        return media_type, "other", 1, display_num, message_id
 
 # ========== КОМАНДЫ ДЛЯ УПРАВЛЕНИЯ ПЕРЕСЫЛКАМИ ==========
 
@@ -431,35 +504,71 @@ def mark_command(update: Update, context: CallbackContext):
     if not context.args or len(context.args) < 2:
         update.message.reply_text(
             "📌 *Использование:*\n"
-            "`/mark <номер_сообщения> <куда_переслано>`\n\n"
+            "`/mark <ID_сообщения> <куда_переслано>`\n\n"
             "*Пример:*\n"
-            "`/mark 42 @новости`\n"
-            "`/mark 15 в канал`",
+            "`/mark 1702034567_abc123 @новости`\n"
+            "`/mark 42 в канал`\n\n"
+            "ℹ️ *ID сообщения* смотри в конце каждого сообщения (после 🔢 ID:)\n"
+            "Можно использовать номер сообщения (например: 42)",
             parse_mode='Markdown'
         )
         return
     
-    try:
-        message_num = int(context.args[0])
-        forwarded_to = ' '.join(context.args[1:])
+    search_id = context.args[0]
+    forwarded_to = ' '.join(context.args[1:])
+    
+    # Пробуем найти сообщение по ID
+    if search_id in messages_db:
+        message_data = messages_db[search_id]
+        message_id = search_id
         
-        update_message_status(
-            message_num=message_num,
-            forwarded_to=forwarded_to,
-            forwarded_by=ADMIN_NAME
-        )
-        
-        update.message.reply_text(
-            f"✅ *Сообщение #{message_num} помечено!*\n\n"
-            f"📤 Куда: {forwarded_to}\n"
-            f"👤 Кем: {ADMIN_NAME}\n"
-            f"🕐 Время: {datetime.datetime.now().strftime('%H:%M')}\n\n"
-            f"Теперь в сообщении будет отображаться статус ✅",
-            parse_mode='Markdown'
-        )
-        
-    except ValueError:
-        update.message.reply_text("❌ Неверный номер сообщения!")
+    else:
+        # Пробуем найти по номеру отображения
+        try:
+            display_num = int(search_id)
+            found = False
+            for msg_id, data in messages_db.items():
+                if data.get('display_number') == display_num:
+                    message_data = data
+                    message_id = msg_id
+                    found = True
+                    break
+            
+            if not found:
+                update.message.reply_text(
+                    f"❌ *Сообщение #{search_id} не найдено!*\n\n"
+                    f"ℹ️ Используйте правильный ID или номер сообщения.\n"
+                    f"ID смотрите в конце каждого сообщения (после 🔢 ID:)\n\n"
+                    f"*Пример ID:* `1702034567_abc123`",
+                    parse_mode='Markdown'
+                )
+                return
+        except ValueError:
+            update.message.reply_text(
+                f"❌ *Неверный формат ID!*\n\n"
+                f"ℹ️ Используйте:\n"
+                f"• ID сообщения (например: `1702034567_abc123`)\n"
+                f"• Или номер сообщения (например: `42`)\n\n"
+                f"Смотрите ID в конце каждого полученного сообщения.",
+                parse_mode='Markdown'
+            )
+            return
+    
+    update_message_status(
+        message_id=message_id,
+        forwarded_to=forwarded_to,
+        forwarded_by=ADMIN_NAME
+    )
+    
+    update.message.reply_text(
+        f"✅ *Сообщение #{message_data['display_number']} помечено!*\n\n"
+        f"📤 Куда: {forwarded_to}\n"
+        f"👤 Кем: {ADMIN_NAME}\n"
+        f"🕐 Время: {datetime.datetime.now().strftime('%H:%M')}\n"
+        f"🔢 ID: `{message_id}`\n\n"
+        f"Теперь в сообщении будет отображаться статус ✅",
+        parse_mode='Markdown'
+    )
 
 def status_command_cmd(update: Update, context: CallbackContext):
     """Команда /status - статус конкретного сообщения"""
@@ -468,44 +577,193 @@ def status_command_cmd(update: Update, context: CallbackContext):
         return
     
     if not context.args:
-        update.message.reply_text(
-            "📌 *Использование:*\n"
-            "`/status <номер_сообщения>`\n\n"
-            "*Пример:*\n"
-            "`/status 42`",
-            parse_mode='Markdown'
-        )
+        # Показываем последние сообщения
+        recent_messages = list(messages_db.items())[-5:]  # Последние 5
+        
+        if not recent_messages:
+            update.message.reply_text("📭 *Нет сообщений*")
+            return
+        
+        response = "📋 *ПОСЛЕДНИЕ СООБЩЕНИЯ:*\n\n"
+        
+        for msg_id, data in recent_messages[::-1]:  # В обратном порядке
+            status_icon = "✅" if data['forwarded'] else "⚪"
+            response += f"{status_icon} *#{data['display_number']}* "
+            response += f"({data['time']})\n"
+            response += f"📝 *Тип:* {data['media_type']}\n"
+            
+            # Краткое содержание
+            content_preview = str(data['content'])[:50]
+            if len(str(data['content'])) > 50:
+                content_preview += "..."
+            response += f"📄 *Содержание:* {content_preview}\n"
+            
+            if data['forwarded']:
+                response += f"📤 *Переслано в:* {data['forwarded_to']}\n"
+            
+            response += f"🔢 *ID:* `{msg_id}`\n"
+            response += "─" * 30 + "\n\n"
+        
+        response += "ℹ️ *Используйте:* `/status <ID>` для подробностей"
+        update.message.reply_text(response, parse_mode='Markdown')
         return
     
-    try:
-        message_num = int(context.args[0])
-        status = get_message_status(message_num)
-        
-        if status['forwarded']:
-            response = (
-                f"📊 *СТАТУС СООБЩЕНИЯ #{message_num}*\n\n"
-                f"✅ *ПЕРЕСЛАНО*\n"
-                f"📤 Куда: {status['to']}\n"
-                f"👤 Кем: {status['by']}\n"
-                f"🕐 Когда: {status['time']}\n\n"
-            )
+    # Ищем конкретное сообщение
+    search_id = context.args[0]
+    
+    # Пробуем как ID
+    if search_id in messages_db:
+        data = messages_db[search_id]
+        message_id = search_id
+    else:
+        # Пробуем как номер отображения
+        try:
+            display_num = int(search_id)
+            found = False
+            for msg_id, msg_data in messages_db.items():
+                if msg_data.get('display_number') == display_num:
+                    data = msg_data
+                    message_id = msg_id
+                    found = True
+                    break
             
-            if 'history' in status and status['history']:
-                response += f"📋 *ИСТОРИЯ:*\n"
-                for i, record in enumerate(status['history'], 1):
-                    response += f"{i}. {record['time']} — {record['action']} в {record['to']}\n"
-        else:
-            response = (
-                f"📊 *СТАТУС СООБЩЕНИЯ #{message_num}*\n\n"
-                f"⚪ *НЕ ПЕРЕСЛАНО*\n\n"
-                f"ℹ️ Это сообщение еще не было переслано.\n"
-                f"Используй `/mark {message_num} <куда>` чтобы пометить."
-            )
+            if not found:
+                update.message.reply_text(f"❌ Сообщение #{search_id} не найдено!")
+                return
+        except ValueError:
+            update.message.reply_text(f"❌ Неверный ID: {search_id}")
+            return
+    
+    # Формируем подробный ответ
+    if data['forwarded']:
+        response = (
+            f"📊 *СТАТУС СООБЩЕНИЯ #{data['display_number']}*\n\n"
+            f"✅ *ПЕРЕСЛАНО*\n"
+            f"📤 Куда: {data['forwarded_to']}\n"
+            f"👤 Кем: {data['forwarded_by']}\n"
+            f"🕐 Когда: {data['forwarded_time']}\n\n"
+            f"📝 *ИНФОРМАЦИЯ:*\n"
+            f"• Тип: {data['media_type']}\n"
+            f"• Время получения: {data['time']}\n"
+            f"• ID пользователя: `{data['user_id']}`\n"
+            f"• ID сообщения: `{message_id}`\n\n"
+        )
+    else:
+        response = (
+            f"📊 *СТАТУС СООБЩЕНИЯ #{data['display_number']}*\n\n"
+            f"⚪ *НЕ ПЕРЕСЛАНО*\n\n"
+            f"📝 *ИНФОРМАЦИЯ:*\n"
+            f"• Тип: {data['media_type']}\n"
+            f"• Время получения: {data['time']}\n"
+            f"• ID пользователя: `{data['user_id']}`\n"
+            f"• ID сообщения: `{message_id}`\n\n"
+            f"ℹ️ Используйте `/mark {message_id} <куда>` чтобы пометить."
+        )
+    
+    # Показываем содержание (если текст не очень длинный)
+    if data['media_type'] in ["text", "long_text"] and len(str(data['content'])) < 500:
+        response += f"📄 *СОДЕРЖАНИЕ:*\n{data['content']}\n"
+    
+    update.message.reply_text(response, parse_mode='Markdown')
+
+def list_command(update: Update, context: CallbackContext):
+    """Команда /list - список всех сообщений"""
+    if update.message.from_user.id != YOUR_ID:
+        update.message.reply_text("❌ Эта команда только для админа!")
+        return
+    
+    if not messages_db:
+        update.message.reply_text("📭 *База сообщений пуста*")
+        return
+    
+    # Фильтры
+    filter_type = None
+    if context.args:
+        arg = context.args[0].lower()
+        if arg in ['переслано', 'forwarded', '✅']:
+            filter_type = 'forwarded'
+        elif arg in ['непереслано', 'unforwarded', '⚪']:
+            filter_type = 'unforwarded'
+        elif arg in ['сегодня', 'today']:
+            filter_type = 'today'
+    
+    # Фильтруем сообщения
+    filtered_messages = []
+    today = datetime.datetime.now().strftime('%d.%m.%Y')
+    
+    for msg_id, data in messages_db.items():
+        include = True
         
-        update.message.reply_text(response, parse_mode='Markdown')
+        if filter_type == 'forwarded':
+            include = data['forwarded']
+        elif filter_type == 'unforwarded':
+            include = not data['forwarded']
+        elif filter_type == 'today':
+            include = today in data['time']
         
-    except ValueError:
-        update.message.reply_text("❌ Неверный номер сообщения!")
+        if include:
+            filtered_messages.append((msg_id, data))
+    
+    if not filtered_messages:
+        update.message.reply_text(f"📭 *Нет сообщений по фильтру*")
+        return
+    
+    # Сортируем по времени (новые сначала)
+    filtered_messages.sort(key=lambda x: x[1]['display_number'], reverse=True)
+    
+    # Ограничиваем вывод
+    limit = min(20, len(filtered_messages))
+    filtered_messages = filtered_messages[:limit]
+    
+    # Формируем ответ
+    total = len(messages_db)
+    filtered = len(filtered_messages)
+    
+    if filter_type:
+        filter_text = {
+            'forwarded': '✅ ПЕРЕСЛАННЫЕ',
+            'unforwarded': '⚪ НЕПЕРЕСЛАННЫЕ', 
+            'today': '📅 СЕГОДНЯ'
+        }.get(filter_type, 'ВСЕ')
+        
+        response = f"📋 *{filter_text} СООБЩЕНИЯ* ({filtered} из {total})\n\n"
+    else:
+        response = f"📋 *ПОСЛЕДНИЕ СООБЩЕНИЯ* ({filtered} из {total})\n\n"
+    
+    for msg_id, data in filtered_messages:
+        status_icon = "✅" if data['forwarded'] else "⚪"
+        
+        # Краткая информация
+        time_parts = data['time'].split()
+        time_str = time_parts[0] if len(time_parts) > 0 else data['time']
+        
+        response += f"{status_icon} *#{data['display_number']}* "
+        response += f"— {time_str}\n"
+        
+        # Содержание (первые 30 символов)
+        content_preview = str(data['content'])[:30].replace('\n', ' ')
+        if len(str(data['content'])) > 30:
+            content_preview += "..."
+        
+        response += f"   📄 {content_preview}\n"
+        
+        if data['forwarded']:
+            forwarded_to_preview = data['forwarded_to'][:20]
+            if len(data['forwarded_to']) > 20:
+                forwarded_to_preview += "..."
+            response += f"   📤 {forwarded_to_preview}\n"
+        
+        response += f"   🔢 ID: `{msg_id}`\n"
+        response += "   ─\n"
+    
+    response += f"\nℹ️ *КОМАНДЫ:*\n"
+    response += f"`/list` — все сообщения\n"
+    response += f"`/list переслано` — только пересланные\n"
+    response += f"`/list непереслано` — только непересланные\n"
+    response += f"`/status <ID>` — подробности сообщения\n"
+    response += f"`/mark <ID> <куда>` — пометить пересылку"
+    
+    update.message.reply_text(response, parse_mode='Markdown')
 
 def unforwarded_command(update: Update, context: CallbackContext):
     """Команда /unforwarded - список непересланных сообщений"""
@@ -515,10 +773,9 @@ def unforwarded_command(update: Update, context: CallbackContext):
     
     # Находим непересланные сообщения
     unforwarded = []
-    for msg_num in range(1, stats['total_messages'] + 1):
-        status = get_message_status(msg_num)
-        if not status['forwarded']:
-            unforwarded.append(msg_num)
+    for msg_id, data in messages_db.items():
+        if not data['forwarded']:
+            unforwarded.append((msg_id, data))
     
     if not unforwarded:
         update.message.reply_text(
@@ -529,43 +786,41 @@ def unforwarded_command(update: Update, context: CallbackContext):
         )
         return
     
-    # Группируем по времени
-    now = datetime.datetime.now()
-    recent = []
-    today = []
-    older = []
+    # Сортируем по номеру (новые сначала)
+    unforwarded.sort(key=lambda x: x[1]['display_number'], reverse=True)
     
-    for msg_num in unforwarded:
-        # Для простоты считаем что сообщение #X было X часов назад
-        hours_ago = stats['total_messages'] - msg_num
-        
-        if hours_ago <= 3:
-            recent.append(msg_num)
-        elif hours_ago <= 24:
-            today.append(msg_num)
-        else:
-            older.append(msg_num)
+    # Ограничиваем вывод
+    limit = min(15, len(unforwarded))
+    unforwarded = unforwarded[:limit]
     
     response = f"📋 *НЕПЕРЕСЛАННЫЕ СООБЩЕНИЯ:* {len(unforwarded)} из {stats['total_messages']}\n\n"
     
-    if recent:
-        response += f"🆕 *СВЕЖИЕ (последние 3 часа):*\n"
-        response += f"#{', #'.join(map(str, recent[-5:]))}\n\n"
+    for i, (msg_id, data) in enumerate(unforwarded, 1):
+        # Время в удобном формате
+        time_parts = data['time'].split()
+        time_str = time_parts[0] if len(time_parts) > 0 else data['time']
+        
+        # Содержание (первые 40 символов)
+        content_preview = str(data['content'])[:40].replace('\n', ' ')
+        if len(str(data['content'])) > 40:
+            content_preview += "..."
+        
+        response += f"{i}. *#{data['display_number']}* ({time_str})\n"
+        response += f"   📄 {content_preview}\n"
+        response += f"   🔢 ID: `{msg_id}`\n"
+        
+        if i < len(unforwarded):
+            response += "   ─\n"
     
-    if today:
-        response += f"📅 *СЕГОДНЯ:*\n"
-        response += f"#{', #'.join(map(str, today[-10:]))}\n\n"
-    
-    if older:
-        response += f"📆 *СТАРЫЕ:*\n"
-        response += f"#{', #'.join(map(str, older[:5]))}... (всего {len(older)})\n\n"
-    
-    response += f"📊 *СТАТИСТИКА:*\n"
+    response += f"\n📊 *СТАТИСТИКА:*\n"
     response += f"• Всего сообщений: {stats['total_messages']}\n"
     response += f"• Переслано: {stats['forwarded']}\n"
     response += f"• Не переслано: {len(unforwarded)}\n"
     response += f"• Эффективность: {stats['forwarded'] / stats['total_messages'] * 100 if stats['total_messages'] > 0 else 0:.1f}%\n\n"
-    response += f"💡 *СОВЕТ:* Используй `/mark <номер> <куда>` чтобы пометить!"
+    response += f"💡 *ИСПОЛЬЗОВАНИЕ:*\n"
+    response += f"`/mark {unforwarded[0][0]} @канал` — пометить первое\n"
+    response += f"`/status ID` — подробности сообщения\n"
+    response += f"`/list` — все сообщения"
     
     update.message.reply_text(response, parse_mode='Markdown')
 
@@ -640,13 +895,16 @@ def start_command(update: Update, context: CallbackContext):
     update.message.reply_text(
         f'🕶️ *АНОНИМНЫЙ ЯЩИК 2.0*\n\n'
         f'✨ *НОВЫЕ ФИЧИ:*\n'
-        f'• 📍 Маркировка пересланных сообщений\n'
-        f'• 📊 Отслеживание эффективности\n'
-        f'• ✅ Визуальные статусы (⚪/✅)\n'
-        f'• 🎭 100+ IT-анекдотов\n\n'
+        f'• 📍 Уникальные ID сообщений\n'
+        f'• 📊 База данных сообщений\n'
+        f'• ✅ Точная маркировка пересылок\n'
+        f'• 🔍 Поиск по ID или номеру\n'
+        f'• 🎭 100+ IT-анекдотов\n'
+        f'• 📚 9 новых фактов\n\n'
         f'🔧 *Команды админа:*\n'
-        f'/mark — пометить как пересланное\n'
-        f'/status — статус сообщения\n'
+        f'/mark <ID> <куда> — пометить пересылку\n'
+        f'/status <ID> — статус сообщения\n'
+        f'/list — все сообщения\n'
         f'/unforwarded — непересланные\n\n'
         f'🎯 *Используй кнопки ниже или команды!*',
         parse_mode='Markdown',
@@ -664,7 +922,8 @@ def help_command(update: Update, context: CallbackContext):
         '• Сохраняется *полное форматирование*\n\n'
         '🔹 *СТАТУСЫ ПЕРЕСЫЛОК:*\n'
         '• ⚪ — сообщение не переслано\n'
-        '• ✅ — сообщение переслано админом\n\n'
+        '• ✅ — сообщение переслано админом\n'
+        '• 🔢 ID — уникальный идентификатор\n\n'
         '🔹 *ЧТО МОЖНО ОТПРАВИТЬ:*\n'
         '• 📝 Текст любого размера\n'
         '• 📸 Фото с подписями\n'
@@ -689,17 +948,21 @@ def stats_command(update: Update, context: CallbackContext):
         f'📨 Всего сообщений: *{stats["total_messages"]}*\n'
         f'📅 Сегодня: *{stats["today_messages"]}*\n'
         f'✅ Переслано: *{stats["forwarded"]}*\n'
-        f'⚪ Не переслано: *{stats["total_messages"] - stats["forwarded"]}*\n\n'
+        f'⚪ Не переслано: *{stats["total_messages"] - stats["forwarded"]}*\n'
+        f'💾 В базе: *{len(messages_db)}*\n\n'
         
         f'📈 *ЭФФЕКТИВНОСТЬ:*\n'
         f'• Пересылки: *{stats["forwarded"] / stats["total_messages"] * 100 if stats["total_messages"] > 0 else 0:.1f}%*\n'
-        f'• Сообщений/день: *{stats["total_messages"] // 30 if stats["total_messages"] > 30 else 1}*\n\n'
+        f'• Сообщений/день: *{stats["today_messages"]}*\n\n'
+        
+        f'🎪 *РАЗВЛЕЧЕНИЯ:*\n'
+        f'• Анекдотов: *{len(JOKES)}*\n'
+        f'• Фактов: *{len(FACTS)}*\n\n'
         
         f'🔧 *СИСТЕМА:*\n'
-        f'• Маркировка: *Включена* ✅\n'
-        f'• Анекдотов: *{len(JOKES)}*\n'
-        f'• Фактов: *{len(FACTS)}*\n'
-        f'• Статусы: ⚪/✅'
+        f'• Уникальные ID: ✅ РАБОТАЕТ\n'
+        f'• Маркировка: ⚪/✅\n'
+        f'• ID формат: timestamp_random'
     )
     update.message.reply_text(stats_text, parse_mode='Markdown')
 
@@ -819,6 +1082,7 @@ def menu_command(update: Update, context: CallbackContext):
         '/admin — Панель админа\n'
         '/mark — Пометить пересылку\n'
         '/status — Статус сообщения\n'
+        '/list — Список сообщений\n'
         '/unforwarded — Непересланные\n\n'
         
         '✨ *ИСПОЛЬЗУЙ КНОПКИ ИЛИ КОМАНДЫ!*'
@@ -832,41 +1096,34 @@ def admin_command(update: Update, context: CallbackContext):
     if update.message.from_user.id == YOUR_ID:
         now = datetime.datetime.now()
         
-        # Статистика пересылок
-        forwarded_stats = {
-            'today': sum(1 for status in message_status.values() 
-                        if status['forwarded'] and 
-                        status.get('time', '').startswith(now.strftime('%H:%M')[:2])),
-            'total': stats['forwarded']
-        }
-        
         admin_text = (
             f'🛡️ *ПАНЕЛЬ АДМИНИСТРАТОРА*\n\n'
             
-            f'📊 *СТАТИСТИКА ПЕРЕСЫЛОК:*\n'
+            f'📊 *СТАТИСТИКА:*\n'
             f'• Всего сообщений: *{stats["total_messages"]}*\n'
-            f'• Переслано: *{forwarded_stats["total"]}*\n'
-            f'• Сегодня переслано: *{forwarded_stats["today"]}*\n'
-            f'• Эффективность: *{forwarded_stats["total"] / stats["total_messages"] * 100 if stats["total_messages"] > 0 else 0:.1f}%*\n\n'
-            
-            f'🎮 *РАЗВЛЕЧЕНИЯ:*\n'
-            f'• Анекдотов: *{len(JOKES)}*\n'
-            f'• Фактов: *{len(FACTS)}*\n'
-            f'• Цитат: 6\n\n'
+            f'• В базе данных: *{len(messages_db)}*\n'
+            f'• Переслано: *{stats["forwarded"]}*\n'
+            f'• Эффективность: *{stats["forwarded"] / stats["total_messages"] * 100 if stats["total_messages"] > 0 else 0:.1f}%*\n\n'
             
             f'🔧 *КОМАНДЫ УПРАВЛЕНИЯ:*\n'
-            f'/mark <номер> <куда> — пометить пересылку\n'
-            f'/status <номер> — статус сообщения\n'
-            f'/unforwarded — непересланные\n'
-            f'/stats — общая статистика\n\n'
+            f'`/mark <ID> <куда>` — пометить пересылку\n'
+            f'`/status <ID>` — статус сообщения\n'
+            f'`/list` — все сообщения\n'
+            f'`/list переслано` — пересланные\n'
+            f'`/list непереслано` — непересланные\n'
+            f'`/unforwarded` — непересланные (кратко)\n\n'
             
             f'⚙️ *СИСТЕМА:*\n'
-            f'• Маркировка: РАБОТАЕТ ✅\n'
-            f'• Статусы: ⚪=не переслано, ✅=переслано\n'
-            f'• Время: {now.strftime("%H:%M:%S")}\n'
-            f'• Факты: ОБНОВЛЕНЫ 🎉\n\n'
+            f'• Уникальные ID: ✅ РАБОТАЕТ\n'
+            f'• ID формат: `timestamp_random`\n'
+            f'• Пример ID: `1702034567_abc123`\n'
+            f'• Время: {now.strftime("%H:%M:%S")}\n\n'
             
-            f'💡 *СОВЕТ:* Сразу помечай пересланные сообщения командой /mark!'
+            f'💡 *КАК РАБОТАТЬ:*\n'
+            f'1. Смотри ID в конце каждого сообщения\n'
+            f'2. Используй `/mark ID @канал`\n'
+            f'3. Проверяй статус `/status ID`\n'
+            f'4. Смотри все `/list`'
         )
         update.message.reply_text(admin_text, parse_mode='Markdown')
     else:
@@ -885,16 +1142,16 @@ def handle_message(update: Update, context: CallbackContext):
         return  # Если это была команда от кнопки - выходим
     
     user = update.message.from_user
-    logger.info(f"📨 #{stats['total_messages'] + 1} от пользователя {user.id}")
+    logger.info(f"📨 Входящее сообщение от пользователя {user.id}")
     
     try:
-        media_type, media_category, parts_count = send_with_header(update, context, YOUR_ID)
+        media_type, media_category, parts_count, display_num, message_id = send_with_header(update, context, YOUR_ID)
         
         if media_category == "long_text":
             if parts_count > 1:
                 response = (
                     f"✅ *Длинный текст отправлен!*\n"
-                    f"🔢 Номер: #{stats['total_messages']}\n"
+                    f"🔢 Номер: #{display_num}\n"
                     f"📄 Частей: {parts_count}\n"
                     f"🔐 Статус: Доставлено с цитированием\n"
                     f"💡 Совет: В Telegram текст можно развернуть/свернуть\n\n"
@@ -903,7 +1160,7 @@ def handle_message(update: Update, context: CallbackContext):
             else:
                 response = (
                     f"✅ *Длинный текст отправлен!*\n"
-                    f"🔢 Номер: #{stats['total_messages']}\n"
+                    f"🔢 Номер: #{display_num}\n"
                     f"📏 Символов: {len(update.message.text) if update.message.text else 0}\n"
                     f"🔐 Статус: Доставлено с цитированием\n"
                     f"💡 Фича: Текст свернут для удобства просмотра\n\n"
@@ -922,7 +1179,7 @@ def handle_message(update: Update, context: CallbackContext):
             
             response = (
                 f"✅ *{media_type} отправлен!*\n"
-                f"🔢 Номер: #{stats['total_messages']}\n"
+                f"🔢 Номер: #{display_num}\n"
                 f"🔐 Статус: Доставлено анонимно\n"
                 f"💫 {random_response}\n\n"
                 f"🕐 {datetime.datetime.now().strftime('%H:%M')}"
@@ -953,8 +1210,9 @@ def main():
     logger.info(f"👑 Админ ID: {YOUR_ID}")
     logger.info(f"😂 Анекдотов: {len(JOKES)}")
     logger.info(f"📚 Фактов: {len(FACTS)}")
-    logger.info("✅ Маркировка пересланных сообщений: ВКЛЮЧЕНО")
+    logger.info("✅ Уникальные ID сообщений: ВКЛЮЧЕНО")
     logger.info("✅ Статусы: ⚪ (не переслано), ✅ (переслано)")
+    logger.info("✅ База данных сообщений: ГОТОВА")
     
     try:
         updater = Updater(TOKEN, use_context=True)
@@ -975,6 +1233,7 @@ def main():
             ('admin', admin_command),
             ('mark', mark_command),
             ('status', status_command_cmd),
+            ('list', list_command),
             ('unforwarded', unforwarded_command),
         ]
         
@@ -995,6 +1254,8 @@ def main():
         logger.info(f"✅ Команд: {len(commands)}")
         logger.info(f"✅ Анекдотов: {len(JOKES)}")
         logger.info(f"✅ Фактов: {len(FACTS)} (обновлены!)")
+        logger.info(f"✅ Сообщений в базе: {len(messages_db)}")
+        logger.info("✅ Уникальные ID: timestamp_random")
         logger.info("✅ Маркировка пересылок: ⚪/✅")
         logger.info("✅ Кнопки: РАБОТАЮТ")
         logger.info("✅ Готов к работе 24/7!")
