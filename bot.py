@@ -471,9 +471,16 @@ def button_handler(update: Update, context: CallbackContext):
                 if len(str(message_data['content'])) > 100:
                     content_preview += "..."
                 
+                # Формируем информацию о сообщении
+                status_icon = "✅" if message_data['forwarded'] else "⚪"
+                reply_icon = "💬" if message_data['replied'] else "📭"
+                
                 query.edit_message_text(
                     f"💬 *ОТВЕТ НА СООБЩЕНИЕ #{message_data['display_number']}*\n\n"
-                    f"📄 *Сообщение:*\n{content_preview}\n\n"
+                    f"{status_icon}{reply_icon} *Статус:* {'Переслано' if message_data['forwarded'] else 'Не переслано'} | {'Отвечено' if message_data['replied'] else 'Нет ответа'}\n"
+                    f"🕐 *Время:* {message_data['time']}\n"
+                    f"👤 *ID отправителя:* `{message_data['user_id']}`\n"
+                    f"📝 *Текст сообщения:*\n{content_preview}\n\n"
                     f"✏️ *Введите ваш ответ:*\n"
                     f"Просто отправьте текст ответом на это сообщение.\n\n"
                     f"ℹ️ Ответ будет отправлен анонимно отправителю.",
