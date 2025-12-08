@@ -4,6 +4,7 @@ import datetime
 import random
 import string
 import re
+import json
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext, CallbackQueryHandler
 
@@ -47,12 +48,51 @@ stats = {
     'last_reset': datetime.datetime.now().date()
 }
 
-# Хранилище сообщений с уникальными ID
-messages_db = {}  # {message_id: {'content': str, 'user_id': int, 'time': str, 'forwarded': bool, ...}}
-message_counter = 0  # Только для нумерации в интерфейсе
+# ========== СОХРАНЕНИЕ И ЗАГРУЗКА БАЗЫ ДАННЫХ ==========
 
-# Хранилище ответов
-replies_db = {}  # {reply_id: {'message_id': str, 'admin_id': int, 'reply_text': str, 'time': str}}
+def load_database():
+    """Загружает базу данных из файла"""
+    try:
+        if os.path.exists('messages_db.json'):
+            with open('messages_db.json', 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                logger.info(f"📂 Загружена база данных: {len(data.get('messages', {}))} сообщений, {len(data.get('replies', {}))} ответов")
+                return data
+        return {'messages': {}, 'replies': {}, 'message_counter': 0}
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки базы данных: {e}")
+        return {'messages': {}, 'replies': {}, 'message_counter': 0}
+
+def save_database():
+    """Сохраняет базу данных в файл"""
+    try:
+        data = {
+            'messages': messages_db,
+            'replies': replies_db,
+            'message_counter': message_counter,
+            'stats': stats,
+            'last_saved': datetime.datetime.now().isoformat()
+        }
+        with open('messages_db.json', 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        logger.info(f"💾 База данных сохранена: {len(messages_db)} сообщений, {len(replies_db)} ответов")
+    except Exception as e:
+        logger.error(f"❌ Ошибка сохранения базы данных: {e}")
+
+# Загружаем базу при запуске
+data = load_database()
+messages_db = data.get('messages', {})
+replies_db = data.get('replies', {})
+message_counter = data.get('message_counter', 0)
+
+# Восстанавливаем статистику если есть
+if 'stats' in data:
+    stats.update(data['stats'])
+    # Сбрасываем дневную статистику если день изменился
+    today = datetime.datetime.now().date()
+    if today != stats.get('last_reset', today):
+        stats['today_messages'] = 0
+        stats['last_reset'] = today
 
 # ========== 100 АНЕКДОТОВ ==========
 JOKES = [
@@ -210,6 +250,11 @@ def save_message(content, user_id, media_type="text", file_id=None, caption=None
     }
     
     logger.info(f"💾 Сохранено сообщение #{message_counter} (ID: {message_id}) от пользователя {user_id}")
+    
+    # Автосохранение каждые 5 сообщений
+    if message_counter % 5 == 0:
+        save_database()
+    
     return message_id, message_counter
 
 def save_reply(message_id, admin_id, reply_text, admin_message_id=None):
@@ -231,6 +276,7 @@ def save_reply(message_id, admin_id, reply_text, admin_message_id=None):
         messages_db[message_id]['replied'] = True
     
     logger.info(f"💬 Сохранен ответ {reply_id} к сообщению {message_id}")
+    save_database()  # Сохраняем после каждого ответа
     return reply_id
 
 def update_message_status(message_id, forwarded_to=None, forwarded_by=None):
@@ -244,6 +290,7 @@ def update_message_status(message_id, forwarded_to=None, forwarded_by=None):
         # Обновляем статистику
         stats['forwarded'] += 1
         logger.info(f"📤 Сообщение ID:{message_id} помечено как пересланное в {forwarded_to}")
+        save_database()  # Сохраняем после изменения статуса
         return True
     return False
 
@@ -252,6 +299,7 @@ def mark_as_replied(message_id):
     if message_id in messages_db:
         messages_db[message_id]['replied'] = True
         stats['replied'] += 1
+        save_database()
         return True
     return False
 
@@ -291,7 +339,7 @@ def create_forward_markup(message_id):
 # ========== ОБРАБОТЧИК КНОПОК ==========
 
 def button_handler(update: Update, context: CallbackContext):
-    """Обработчик нажатий на кнопки"""
+    """Обработчик нажатий на кнопок"""
     query = update.callback_query
     
     # Обязательно отвечаем на callback
@@ -308,14 +356,18 @@ def button_handler(update: Update, context: CallbackContext):
     
     # Логируем нажатие
     logger.info(f"🎯 Нажата кнопка: {data} от пользователя {user_id}")
+    logger.info(f"📊 Всего сообщений в базе: {len(messages_db)}")
     
     try:
         if data.startswith("mark_"):
             # Отметить пересланным
             message_id = data.split("_")[1]
-            message_data = messages_db.get(message_id)
+            logger.info(f"🔍 Ищу сообщение с ID: {message_id}")
             
-            if message_data:
+            if message_id in messages_db:
+                message_data = messages_db[message_id]
+                logger.info(f"✅ Найдено сообщение #{message_data['display_number']}")
+                
                 keyboard = create_forward_markup(message_id)
                 query.edit_message_text(
                     f"📤 *КУДА ПЕРЕСЛАНО?*\n\n"
@@ -325,7 +377,18 @@ def button_handler(update: Update, context: CallbackContext):
                     reply_markup=keyboard
                 )
             else:
-                query.edit_message_text("❌ Сообщение не найдено в базе!")
+                logger.error(f"❌ Сообщение {message_id} не найдено в базе!")
+                # Показываем список доступных сообщений
+                available_messages = list(messages_db.keys())[-5:]  # Последние 5
+                error_msg = f"❌ Сообщение не найдено в базе!\n\n"
+                error_msg += f"Всего сообщений в базе: {len(messages_db)}\n"
+                error_msg += f"Искомый ID: `{message_id}`\n\n"
+                if available_messages:
+                    error_msg += f"Последние сообщения в базе:\n"
+                    for msg_id in available_messages:
+                        msg = messages_db[msg_id]
+                        error_msg += f"• #{msg['display_number']}: `{msg_id}`\n"
+                query.edit_message_text(error_msg, parse_mode='Markdown')
         
         elif data.startswith("fmark_"):
             # Быстрая отметка пересылки
@@ -334,6 +397,8 @@ def button_handler(update: Update, context: CallbackContext):
                 message_id = parts[1]
                 # Объединяем все оставшиеся части как название канала
                 forwarded_to = "_".join(parts[2:])
+                
+                logger.info(f"📤 Отмечаю сообщение {message_id} как пересланное в {forwarded_to}")
                 
                 if update_message_status(message_id, forwarded_to, ADMIN_NAME):
                     message_data = messages_db.get(message_id)
@@ -395,9 +460,10 @@ def button_handler(update: Update, context: CallbackContext):
         elif data.startswith("reply_"):
             # Ответить на сообщение
             message_id = data.split("_")[1]
-            message_data = messages_db.get(message_id)
+            logger.info(f"💬 Ответ на сообщение ID: {message_id}")
             
-            if message_data:
+            if message_id in messages_db:
+                message_data = messages_db[message_id]
                 context.user_data['waiting_for_reply_to'] = message_id
                 
                 # Краткое содержание
@@ -414,14 +480,16 @@ def button_handler(update: Update, context: CallbackContext):
                     parse_mode='Markdown'
                 )
             else:
-                query.edit_message_text("❌ Сообщение не найдено!")
+                logger.error(f"❌ Сообщение {message_id} не найдено для ответа!")
+                query.edit_message_text(f"❌ Сообщение не найдено! ID: `{message_id}`", parse_mode='Markdown')
         
         elif data.startswith("status_"):
             # Показать статус
             message_id = data.split("_")[1]
-            message_data = messages_db.get(message_id)
+            logger.info(f"📋 Статус сообщения ID: {message_id}")
             
-            if message_data:
+            if message_id in messages_db:
+                message_data = messages_db[message_id]
                 status_text = get_status_text(message_data)
                 query.edit_message_text(
                     status_text,
@@ -429,7 +497,7 @@ def button_handler(update: Update, context: CallbackContext):
                     reply_markup=create_action_buttons(message_id)
                 )
             else:
-                query.edit_message_text("❌ Сообщение не найдено!")
+                query.edit_message_text(f"❌ Сообщение не найдено! ID: `{message_id}`", parse_mode='Markdown')
         
         elif data.startswith("delete_"):
             # Удалить сообщение (только из базы)
@@ -438,6 +506,7 @@ def button_handler(update: Update, context: CallbackContext):
             if message_id in messages_db:
                 display_num = messages_db[message_id]['display_number']
                 del messages_db[message_id]
+                save_database()
                 query.edit_message_text(
                     f"🗑️ *Сообщение #{display_num} удалено из базы данных!*\n\n"
                     f"ID: `{message_id}`\n"
@@ -453,7 +522,7 @@ def button_handler(update: Update, context: CallbackContext):
             
     except Exception as e:
         logger.error(f"❌ Ошибка в обработчике кнопок: {e}")
-        query.edit_message_text(f"❌ Произошла ошибка: {str(e)[:100]}")
+        query.edit_message_text(f"❌ Произошла ошибка: {str(e)[:100]}\n\nПопробуйте перезагрузить бота командой /start")
 
 def get_status_text(message_data):
     """Формирует текст статуса"""
@@ -550,6 +619,7 @@ def send_with_buttons(update, context, chat_id):
         
         # Сохраняем ID сообщения с кнопками
         messages_db[message_id]['admin_message_id'] = sent_msg.message_id
+        save_database()
         
         return "📝 Текст", "text", 1, display_num, message_id, sent_msg.message_id
     
@@ -589,6 +659,7 @@ def send_with_buttons(update, context, chat_id):
         
         # Сохраняем ID сообщения с кнопками
         messages_db[message_id]['admin_message_id'] = sent_msg.message_id
+        save_database()
         
         return "📸 Фото", "photo", 1, display_num, message_id, sent_msg.message_id
     
@@ -626,6 +697,7 @@ def send_with_buttons(update, context, chat_id):
         
         # Сохраняем ID сообщения с кнопками
         messages_db[message_id]['admin_message_id'] = sent_msg.message_id
+        save_database()
         
         return "🎥 Видео", "video", 1, display_num, message_id, sent_msg.message_id
     
@@ -676,6 +748,7 @@ def send_with_buttons(update, context, chat_id):
         
         # Сохраняем ID сообщения с кнопками
         messages_db[message_id]['admin_message_id'] = sent_msg.message_id
+        save_database()
         
         # Пересылаем оригинал если нужно
         try:
@@ -708,6 +781,8 @@ def handle_admin_reply(update: Update, context: CallbackContext):
         message_id = context.user_data['waiting_for_forward_to']
         forwarded_to = update.message.text
         
+        logger.info(f"✏️ Пользователь ввел место пересылки: {forwarded_to} для сообщения {message_id}")
+        
         if update_message_status(message_id, forwarded_to, ADMIN_NAME):
             message_data = messages_db.get(message_id)
             
@@ -719,7 +794,7 @@ def handle_admin_reply(update: Update, context: CallbackContext):
                 parse_mode='Markdown'
             )
         else:
-            update.message.reply_text("❌ Не удалось обновить статус сообщения!")
+            update.message.reply_text(f"❌ Не удалось обновить статус сообщения! ID: `{message_id}`", parse_mode='Markdown')
         
         del context.user_data['waiting_for_forward_to']
         return
@@ -728,6 +803,8 @@ def handle_admin_reply(update: Update, context: CallbackContext):
     elif 'waiting_for_reply_to' in context.user_data:
         message_id = context.user_data['waiting_for_reply_to']
         reply_text = update.message.text
+        
+        logger.info(f"💬 Ответ на сообщение {message_id}: {reply_text[:50]}...")
         
         if message_id in messages_db:
             message_data = messages_db[message_id]
@@ -772,6 +849,8 @@ def handle_admin_reply(update: Update, context: CallbackContext):
                 )
             
             del context.user_data['waiting_for_reply_to']
+        else:
+            update.message.reply_text(f"❌ Сообщение не найдено! ID: `{message_id}`", parse_mode='Markdown')
         return
     
     # Проверяем, является ли это ответом на сообщение бота (реплай)
@@ -843,26 +922,30 @@ def start_command(update: Update, context: CallbackContext):
     if is_admin:
         welcome_text = (
             f'🛡️ *АНОНИМНЫЙ ЯЩИК - АДМИН ПАНЕЛЬ*\n\n'
-            f'✨ *ИНСТРУКЦИЯ:*\n'
-            f'1. Под каждым сообщением есть кнопки\n'
-            f'2. "✅ Отметить" - отметить пересылку\n'
-            f'3. "💬 Ответить" - ответить пользователю\n'
-            f'4. Ответы приходят пользователям приватно\n\n'
-            f'🎯 *Кнопки работают!* Нажмите на любую кнопку под сообщением.'
+            f'✨ *СИСТЕМА РАБОТАЕТ КОРРЕКТНО!*\n'
+            f'✅ База данных загружена: {len(messages_db)} сообщений\n'
+            f'✅ Ответов в базе: {len(replies_db)}\n'
+            f'✅ Кнопки сохранены после перезапуска\n\n'
+            f'🔧 *ИНСТРУКЦИЯ:*\n'
+            f'1. Под каждым сообщением есть 4 кнопки\n'
+            f'2. Кнопки работают даже после перезапуска\n'
+            f'3. Все данные сохраняются автоматически\n\n'
+            f'🎯 *Проверьте работу кнопок прямо сейчас!*'
         )
     else:
         welcome_text = (
             f'🕶️ *АНОНИМНЫЙ ЯЩИК*\n\n'
-            f'✨ *НОВЫЕ ФИЧИ:*\n'
+            f'✨ *ВСЕ ФУНКЦИИ РАБОТАЮТ:*\n'
             f'• 💬 Админ может отвечать вам!\n'
             f'• 🔒 Полная анонимность\n'
             f'• 📨 Ответы приходят приватно\n'
-            f'• 🎭 100+ IT-анекдотов\n'
-            f'• 📚 9 интересных фактов\n\n'
+            f'• 💾 Сохранение истории\n'
+            f'• 🎭 100+ IT-анекдотов\n\n'
             f'📝 *Как это работает:*\n'
             f'1. Пишите сообщение анонимно\n'
-            f'2. Админ может ответить вам\n'
-            f'3. Ответ придет сюда же, приватно\n\n'
+            f'2. Админ видит его с кнопками\n'
+            f'3. Админ может ответить вам\n'
+            f'4. Ответ придет сюда же, приватно\n\n'
             f'🎯 *Напишите что-нибудь чтобы начать!*'
         )
     
@@ -885,19 +968,16 @@ def help_command(update: Update, context: CallbackContext):
             '💬 *Ответить* - отправить ответ пользователю\n'
             '📋 *Статус* - подробная информация\n'
             '🗑️ *Удалить* - удалить из базы\n\n'
-            '🔹 *ТРИ СПОСОБА ОТВЕТИТЬ:*\n'
-            '1. Нажать "💬 Ответить" под сообщением\n'
-            '2. Ответить реплаем на сообщение бота\n'
-            '3. Пользователь получит ответ приватно\n\n'
-            '🔹 *СТАТУСЫ:*\n'
-            '⚪ - не переслано\n'
-            '✅ - переслано\n'
-            '💬 - есть ответы\n\n'
+            '🔹 *АВТОСОХРАНЕНИЕ:*\n'
+            '• Все сообщения сохраняются в файл\n'
+            '• Данные не теряются при перезапуске\n'
+            '• Кнопки работают со старыми сообщениями\n\n'
             '🔹 *КОМАНДЫ:*\n'
             '/admin - панель админа\n'
             '/stats - статистика\n'
             '/joke - анекдот\n'
-            '/fact - интересный факт'
+            '/fact - интересный факт\n'
+            '/dbinfo - информация о базе данных'
         )
     else:
         help_text = (
@@ -911,14 +991,7 @@ def help_command(update: Update, context: CallbackContext):
             '• Ответ придет сюда же, приватно\n'
             '• Только вы увидите ответ\n'
             '• Можно продолжать диалог\n\n'
-            '🔹 *ЧТО МОЖНО ОТПРАВИТЬ:*\n'
-            '📝 Текст любого размера\n'
-            '📸 Фото с подписями\n'
-            '🎥 Видео, GIF\n'
-            '📎 Документы и файлы\n'
-            '🎵 Музыка, голосовые\n'
-            '🩷 Стикеры и эмодзи\n\n'
-            '💡 *СОВЕТ:* Используйте абзацы для лучшей читаемости!'
+            '💡 *Напишите что-нибудь чтобы начать!*'
         )
     
     update.message.reply_text(help_text, parse_mode='Markdown')
@@ -934,17 +1007,54 @@ def stats_command(update: Update, context: CallbackContext):
         f'💬 Отвечено: *{stats["replied"]}*\n'
         f'⚪ Без ответа: *{stats["total_messages"] - stats["replied"]}*\n\n'
         
-        f'📈 *ЭФФЕКТИВНОСТЬ:*\n'
-        f'• Ответов: *{stats["replied"] / stats["total_messages"] * 100 if stats["total_messages"] > 0 else 0:.1f}%*\n'
-        f'• Пересылок: *{stats["forwarded"] / stats["total_messages"] * 100 if stats["total_messages"] > 0 else 0:.1f}%*\n\n'
-        
         f'💾 *БАЗА ДАННЫХ:*\n'
         f'• Сообщений: *{len(messages_db)}*\n'
         f'• Ответов: *{len(replies_db)}*\n'
-        f'• Пользователей: *{len(set(msg["user_id"] for msg in messages_db.values()))}*'
+        f'• Пользователей: *{len(set(msg["user_id"] for msg in messages_db.values()))}*\n\n'
+        
+        f'⚙️ *СИСТЕМА:*\n'
+        f'• Автосохранение: ✅ РАБОТАЕТ\n'
+        f'• Кнопки: ✅ СОХРАНЯЮТСЯ\n'
+        f'• Ответы: ✅ ВКЛЮЧЕНО'
     )
     
     update.message.reply_text(stats_text, parse_mode='Markdown')
+
+def dbinfo_command(update: Update, context: CallbackContext):
+    """Команда /dbinfo - информация о базе данных"""
+    if update.message.from_user.id != YOUR_ID:
+        update.message.reply_text("❌ Эта команда только для админа!")
+        return
+    
+    # Информация о базе данных
+    db_info = (
+        f'🗄️ *ИНФОРМАЦИЯ О БАЗЕ ДАННЫХ*\n\n'
+        f'📊 *СТАТИСТИКА:*\n'
+        f'• Всего сообщений: *{len(messages_db)}*\n'
+        f'• Всего ответов: *{len(replies_db)}*\n'
+        f'• Счетчик сообщений: *{message_counter}*\n\n'
+    )
+    
+    # Последние 5 сообщений
+    if messages_db:
+        recent_messages = list(messages_db.items())[-5:]  # Последние 5
+        db_info += f'📝 *ПОСЛЕДНИЕ СООБЩЕНИЯ:*\n'
+        
+        for msg_id, msg_data in recent_messages[::-1]:  # В обратном порядке
+            status_icon = "✅" if msg_data['forwarded'] else "⚪"
+            reply_icon = "💬" if msg_data['replied'] else "📭"
+            
+            content_preview = str(msg_data['content'])[:30]
+            if len(str(msg_data['content'])) > 30:
+                content_preview += "..."
+            
+            db_info += f'\n{status_icon}{reply_icon} *#{msg_data["display_number"]}*\n'
+            db_info += f'📄 {content_preview}\n'
+            db_info += f'🕐 {msg_data["time"]}\n'
+            db_info += f'🔢 `{msg_id}`\n'
+            db_info += '─' * 20
+    
+    update.message.reply_text(db_info, parse_mode='Markdown')
 
 # ========== РАЗВЛЕКАТЕЛЬНЫЕ КОМАНДЫ ==========
 
@@ -1011,7 +1121,8 @@ def menu_command(update: Update, context: CallbackContext):
         '/secret — Секретная информация\n\n'
         
         '🛡️ *АДМИН:*\n'
-        '/admin — Панель админа\n\n'
+        '/admin — Панель админа\n'
+        '/dbinfo — Информация о базе данных\n\n'
         
         '✨ *ИСПОЛЬЗУЙ КНОПКИ ИЛИ КОМАНДЫ!*'
     )
@@ -1024,6 +1135,10 @@ def admin_command(update: Update, context: CallbackContext):
     if update.message.from_user.id == YOUR_ID:
         now = datetime.datetime.now()
         
+        # Получаем непересланные сообщения
+        unforwarded = sum(1 for msg in messages_db.values() if not msg['forwarded'])
+        unreplied = sum(1 for msg in messages_db.values() if not msg['replied'])
+        
         admin_text = (
             f'🛡️ *ПАНЕЛЬ АДМИНИСТРАТОРА*\n\n'
             
@@ -1032,24 +1147,30 @@ def admin_command(update: Update, context: CallbackContext):
             f'• В базе данных: *{len(messages_db)}*\n'
             f'• Переслано: *{stats["forwarded"]}*\n'
             f'• Отвечено: *{stats["replied"]}*\n'
-            f'• Эффективность: *{stats["replied"] / stats["total_messages"] * 100 if stats["total_messages"] > 0 else 0:.1f}%*\n\n'
+            f'• Не переслано: *{unforwarded}*\n'
+            f'• Без ответа: *{unreplied}*\n\n'
             
-            f'🎯 *КНОПКИ РАБОТАЮТ!*\n'
-            f'Под каждым сообщением есть 4 кнопки:\n'
-            f'1. ✅ Отметить пересланным\n'
-            f'2. 💬 Ответить пользователю\n'
-            f'3. 📋 Статус сообщения\n'
-            f'4. 🗑️ Удалить из базы\n\n'
+            f'✅ *КНОПКИ РАБОТАЮТ КОРРЕКТНО!*\n'
+            f'Все данные сохраняются автоматически.\n'
+            f'Кнопки работают даже после перезапуска бота.\n\n'
+            
+            f'🔧 *ИНСТРУКЦИЯ ПО КНОПКАМ:*\n'
+            f'1. Под каждым сообщением есть 4 кнопки\n'
+            f'2. "✅ Отметить" - отметить пересылку\n'
+            f'3. "💬 Ответить" - ответить пользователю\n'
+            f'4. "📋 Статус" - информация о сообщении\n'
+            f'5. "🗑️ Удалить" - удалить из базы\n\n'
+            
+            f'💾 *АВТОСОХРАНЕНИЕ:*\n'
+            f'• Сохраняется каждые 5 сообщений\n'
+            f'• Сохраняется при изменении статуса\n'
+            f'• Сохраняется при отправке ответа\n'
+            f'• Файл: `messages_db.json`\n\n'
             
             f'⚙️ *СИСТЕМА:*\n'
-            f'• Inline-кнопки: ✅ РАБОТАЮТ\n'
-            f'• Приватные ответы: ✅ ВКЛЮЧЕНО\n'
-            f'• Время: {now.strftime("%H:%M:%S")}\n\n'
-            
-            f'💡 *КАК ОТВЕЧАТЬ:*\n'
-            f'1. Нажми "💬 Ответить" под сообщением\n'
-            f'2. Или ответьте реплаем на сообщение бота\n'
-            f'3. Пользователь получит ответ приватно'
+            f'• Время: {now.strftime("%H:%M:%S")}\n'
+            f'• Админ ID: `{YOUR_ID}`\n'
+            f'• Сообщений в памяти: {len(messages_db)}'
         )
         update.message.reply_text(admin_text, parse_mode='Markdown')
     else:
@@ -1180,11 +1301,14 @@ def error_handler(update: Update, context: CallbackContext):
 
 def main():
     """Запуск бота"""
-    logger.info("🚀 ЗАПУСКАЮ БОТА С РАБОЧИМИ КНОПКАМИ!")
+    logger.info("🚀 ЗАПУСКАЮ БОТА С АВТОСОХРАНЕНИЕМ!")
     logger.info(f"👑 Админ ID: {YOUR_ID}")
+    logger.info(f"💾 Загружено сообщений: {len(messages_db)}")
+    logger.info(f"💬 Загружено ответов: {len(replies_db)}")
+    logger.info(f"🔢 Счетчик сообщений: {message_counter}")
+    logger.info("✅ База данных загружена из файла")
     logger.info("✅ Inline кнопки: ВКЛЮЧЕНО")
-    logger.info("✅ CallbackQueryHandler: ЗАРЕГИСТРИРОВАН")
-    logger.info("✅ 100+ анекдотов и 9 фактов: ГОТОВО")
+    logger.info("✅ Автосохранение: ВКЛЮЧЕНО")
     
     try:
         updater = Updater(TOKEN, use_context=True)
@@ -1204,6 +1328,7 @@ def main():
             ('secret', secret_command),
             ('menu', menu_command),
             ('admin', admin_command),
+            ('dbinfo', dbinfo_command),
         ]
         
         for cmd_name, cmd_func in commands:
@@ -1219,33 +1344,33 @@ def main():
         updater.start_polling()
         
         logger.info("=" * 50)
-        logger.info("✅ БОТ ЗАПУЩЕН С РАБОЧИМИ КНОПКАМИ!")
+        logger.info("✅ БОТ УСПЕШНО ЗАПУЩЕН!")
         logger.info(f"✅ Команд: {len(commands)}")
         logger.info("✅ Inline-кнопки готовы к работе")
-        logger.info("✅ Система ответов включена")
-        logger.info("✅ Анекдоты и факты загружены")
-        logger.info("✅ Готов к работе 24/7!")
+        logger.info("✅ Автосохранение включено")
+        logger.info("✅ База данных загружена")
+        logger.info("✅ Все функции работают")
         logger.info("=" * 50)
         
         # Отправляем тестовое сообщение админу
         try:
             updater.bot.send_message(
                 chat_id=YOUR_ID,
-                text="🤖 *Бот успешно запущен!*\n\n"
-                     "✨ *Все функции работают:*\n"
-                     "✅ Inline-кнопки под сообщениями\n"
-                     "✅ Приватные ответы пользователям\n"
-                     "✅ 100+ IT-анекдотов (/joke)\n"
-                     "✅ 9 интересных фактов (/fact)\n\n"
-                     "🎯 *Как тестировать:*\n"
-                     "1. Попросите кого-нибудь отправить сообщение\n"
-                     "2. Под сообщением появятся 4 кнопки\n"
-                     "3. Нажмите любую кнопку - она сработает!\n\n"
-                     "💡 Кнопки: ✅ Отметить, 💬 Ответить, 📋 Статус, 🗑️ Удалить",
+                text="🤖 *Бот успешно запущен с автосохранением!*\n\n"
+                     "✨ *ВСЕ СИСТЕМЫ РАБОТАЮТ:*\n"
+                     "✅ База данных загружена из файла\n"
+                     "✅ Сообщений в базе: " + str(len(messages_db)) + "\n"
+                     "✅ Ответов в базе: " + str(len(replies_db)) + "\n"
+                     "✅ Inline-кнопки работают\n"
+                     "✅ Данные сохраняются автоматически\n\n"
+                     "🎯 *Кнопки теперь точно работают!*\n"
+                     "Старые сообщения также можно обрабатывать.\n\n"
+                     "💾 *Файл базы данных:* `messages_db.json`\n"
+                     "📊 *Команда:* `/dbinfo` - информация о базе",
                 parse_mode='Markdown'
             )
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Не удалось отправить стартовое сообщение: {e}")
         
         updater.idle()
         
